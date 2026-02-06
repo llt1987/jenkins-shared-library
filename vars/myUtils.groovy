@@ -54,7 +54,7 @@ def call(Map args = [:]) {
         p = p.replace('/', '\\')
 
         // Detect UNC root form: \\host\share
-        def isUNC = (p ==~ /^\\\\[^\\]+\\[^\\]+/)
+        //def isUNC = (p ==~ /^\\\\[^\\]+\\[^\\]+/)
         def isDriveRoot = (p ==~ /^[A-Za-z]:\\$/)
         def isUNC = (p ==~ /^\\\\[^\\]+\\[^\\]+/)
 
