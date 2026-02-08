@@ -1,0 +1,56 @@
+@Library("posttrade-shared-library") _
+
+properties([
+    parameters([
+        gitParams.novaTagsParameter( // novaTagsParameter (fetch tags real time)
+            name: 'NOVA_VERSION',
+            description: 'Nova version to release Keycloak to',
+            regex: '*NOVA*-00-*',
+            repo: 'git.novacmx.com/nova/novantierserver',
+            credentialsId: 'gitapac-personal-access-token'
+        ),
+    ] + awsParams.awsSecretParameter()) // append AWS secret parameters
+])
+
+def BUILD_BRANCH = gitUtils.getBuildBranch("${params.BRANCH}");
+def IMAGE_TAG = gitUtils.getImageTagFromBranch("${BUILD_BRANCH}");
+def FAILED_STAGE
+
+pipeline {
+    agent {
+        label 'sg-pri-jenkins-01.contemi.com'
+    }
+    tools {
+        maven 'maven-3.6.3'
+        jdk 'jdk-17.0.12'
+    }
+    options {
+        disableConcurrentBuilds()
+    }
+
+    environment {
+        HOME = "/home/svc_jenkins_agent/cicd"
+        PATH_SCRIPTS = "/var/lib/jenkins/script_build"
+        NOVAVERSION      = "700"
+        BUILD_DIR        = "/mnt/novabld"
+        NOVA_BUILD_DIR   = "${BUILD_DIR}/novaarchive/${NOVAVERSION}-BUILDS/${BRANCH}"
+    }
+
+    stages {
+        stage("Precheck"){
+            steps {
+                sh "whoami"
+                echo "Home: $HOME"
+                echo "Branch Manually: ${params.branch}"
+				echo "Branch Automation: ${env.gitlabSourceBranch}"
+				echo "Branch to build: ${BUILD_BRANCH}"
+				echo "Image tag: ${IMAGE_TAG}"
+            }
+        }
+    }
+    post {
+        always {
+            cleanWs();
+        }
+    }
+}

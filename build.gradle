@@ -1,0 +1,42 @@
+plugins {
+    id 'groovy'
+}
+
+repositories {
+    mavenCentral()
+}
+
+dependencies {
+    testImplementation 'org.codehaus.groovy:groovy-all:3.0.9'
+    testImplementation 'com.lesfurets:jenkins-pipeline-unit:1.1'
+    testImplementation 'junit:junit:4.13.2'
+    //implementation 'org.codehaus.groovy:groovy-all:2.4.15'
+    //implementation localGroovy()
+}
+
+/*task runLocalTest(type: JavaExec) {
+    group = 'verification'
+    classpath = sourceSets.main.runtimeClasspath
+    mainClass = 'vars'
+    workingDir = project.projectDir
+}*/
+
+sourceSets {
+    test {
+        groovy {
+            srcDirs = ['tests']
+        }
+    }
+    //main {
+    //    groovy {
+    //        srcDirs = ['vars']
+    //    }
+    //}
+}
+
+test {
+    useJUnit()
+    testLogging {
+        events "passed", "skipped", "failed"
+    }
+}
