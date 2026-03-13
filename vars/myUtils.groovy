@@ -92,3 +92,59 @@ def call(Map args = [:]) {
         os         : os
     ]
 }
+
+
+
+/**
+ * Returns release path and novaVersion with OS-aware base directory.
+ * Works in Jenkins where isUnix()/isWindows() are available.
+ *
+ * args:
+ *   version            (required) e.g., "NOVA123-xyz"
+ *   releaseDir         (optional) override default for current OS
+ *   linuxReleaseDir    (optional) default: "/mnt/Novarel"
+ *   windowsReleaseDir  (optional) default: "D:\\Novarel"   (escaped)
+ *   macReleaseDir      (optional) default: "/Volumes/Novarel"
+ */
+def getReleasePathWithVersion(Map args = [:]) {
+    if (!args.version) {
+        error "version not specified"
+    }
+
+    // Defaults per OS (you can change these)
+    String linuxDefault   = args.get('linuxReleaseDir',   "/mnt/Novarel")
+    String windowsDefault = args.get('windowsReleaseDir', "\\shared.local\novarel")
+    
+
+    // Determine current OS in Jenkins
+    boolean onUnix = isUnix()
+    boolean onWindows = isWindows() // available in newer Jenkins; else !onUnix
+
+    // Choose base dir for current OS
+    String baseDir
+    if (args.releaseDir) {
+        baseDir = args.releaseDir as String
+    } else if (onWindows) {
+        baseDir = windowsDefault
+    } else {
+        // Jenkins doesn't expose mac detection directly; customize if needed.
+        baseDir = linuxDefault
+    }
+
+    // Build novaVersion and path
+    String version = args.version as String
+    String novaVersion = version.replaceAll(/^NOVA(\d+)-.*$/, '$1') + "00"
+
+    // Normalize separators: Windows uses backslashes, Unix uses forward slashes
+    String path
+    if (onWindows) {
+        // Ensure backslashes and no trailing backslash duplications
+        String cleaned = baseDir.replace('/', '\\').replaceAll('\\\\+$','')
+        path = "${cleaned}\\${novaVersion}-BUILDS-RELEASED\\${version}"
+    } else {
+        String cleaned = baseDir.replace('\\', '/').replaceAll('/+$','')
+        path = "${cleaned}/${novaVersion}-BUILDS-RELEASED/${version}"
+    }
+
+    return [path: path, novaVersion: novaVersion]
+}
