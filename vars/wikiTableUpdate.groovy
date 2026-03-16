@@ -1,16 +1,46 @@
 // vars/wikiTableUpdate.groovy
+//
+// Update a single cell in a MediaWiki table by row key and column number.
+// Typical use: update column 3 ("Nova Version") for a row whose "Client Name" (col 1) is "CIMB MY".
+//
+// Usage example (from a Jenkinsfile):
+//
+//   @Library('mw-lib') _
+//   pipeline {
+//     agent any
+//     stages {
+//       stage('Update Nova Version (col 3) for CIMB MY') {
+//         steps {
+//           wikiTableUpdate(
+//             wikiApi:       'https://novawiki.novastp.com/wiki/novadoc/api.php',
+//             pageTitle:     'YourPageTitleHere',
+//             keyColumn:     1,                      // match on column 1 (Client Name)
+//             keyValue:      'CIMB MY',              // row key to match
+//             targetColumn:  3,                      // update the 3rd column
+//             newValue:      '[[NOVA7-00-01-164]]',  // wikitext to write
+//             credentialsId: 'mediawiki-bot-creds',  // Username: RealUser@BotName ; Password: Bot Password
+//             assertLevel:   'user',
+//             markBot:       false,
+//             dryRun:        false
+//           )
+//         }
+//       }
+//     }
+//   }
+
 def call(Map cfg = [:]) {
   // -------- Required inputs --------
-  String wikiApi      = (cfg.wikiApi ?: env.WIKI_API ?: '').trim()
+  String wikiApi      = (cfg.wikiApi   ?: env.WIKI_API ?: '').trim()
   String pageTitle    = (cfg.pageTitle ?: '').trim()
 
   // Which row to change (1-based indices)
-  int    keyColumn    = (cfg.containsKey('keyColumn') ? cfg.keyColumn : 1) as int
+  int    keyColumn    = (cfg.containsKey('keyColumn')    ? cfg.keyColumn    : 1) as int
   String keyValue     = (cfg.keyValue ?: '').trim()   // e.g., "CIMB MY"
   int    targetColumn = (cfg.containsKey('targetColumn') ? cfg.targetColumn : 3) as int
-  String newValue     = (cfg.newValue ?: '').trim()   // wikitext put into column 3, e.g., "[[NOVA7-00-01-164]]"
+  String newValue     = (cfg.newValue ?: '').trim()   // e.g., "[[NOVA7-00-01-164]]"
 
   // Optional table selector (used if the page has multiple tables)
+  // Default tries to match:  ! Client Name !! Stack Name !! Nova Version
   String headerRegex  = (cfg.headerRegex ?: '(?i)\\!\\s*Client\\s*Name\\s*\\!\\!\\s*Stack\\s*Name\\s*\\!\\!\\s*Nova\\s*Version').trim()
 
   // -------- Auth / behavior --------
@@ -25,6 +55,7 @@ def call(Map cfg = [:]) {
   if (!pageTitle) error "wikiTableUpdate: 'pageTitle' is required."
   if (!keyValue)  error "wikiTableUpdate: 'keyValue' (the row key) is required."
   if (targetColumn < 1) error "wikiTableUpdate: 'targetColumn' must be >= 1."
+  if (keyColumn    < 1) error "wikiTableUpdate: 'keyColumn' must be >= 1."
 
   withCredentials([usernamePassword(credentialsId: credentialsId,
     usernameVariable: 'WIKI_USER', passwordVariable: 'WIKI_PASS')]) {
@@ -61,7 +92,7 @@ login_token=$(
     --data-urlencode type=login \
     --data-urlencode format=json \
   | python3 -c 'import sys,json; print(json.load(sys.stdin)["query"]["tokens"]["logintoken"])'
-)  # API:Login token [5](https://en.wikipedia.org/wiki/Help:Creating_a_bot)
+)
 
 echo "==> 2) Login"
 args="
@@ -83,6 +114,7 @@ who=$(printf %s "$who_json" | python3 -c 'import sys,json; j=json.load(sys.stdin
 if [ -z "$who" ] || printf %s "$who" | grep -Eq "^[0-9]+(\\.[0-9]+){3}$"; then
   echo "ERROR: Still anonymous; use HTTPS and verify credentials." >&2; exit 2
 fi
+echo "    Logged in as: $who"
 
 echo "==> 4) CSRF token"
 csrf_token=$(_curl -sG "$WIKI_API" \
@@ -90,7 +122,7 @@ csrf_token=$(_curl -sG "$WIKI_API" \
   --data-urlencode meta=tokens \
   --data-urlencode format=json \
   | python3 -c 'import sys,json; print(json.load(sys.stdin)["query"]["tokens"]["csrftoken"])'
-)  # meta=tokens (csrf) [3](https://github.com/martyav/MediaWiki-Action-API-Code-Samples)
+)
 
 echo "==> 5) Read page"
 page_json=$(_curl -sG "$WIKI_API" \
@@ -101,7 +133,7 @@ page_json=$(_curl -sG "$WIKI_API" \
   --data-urlencode "titles=${PAGE_TITLE}" \
   --data-urlencode format=json \
   --data-urlencode formatversion=2
-)  # query+revisions (content|timestamp) [1](https://stackoverflow.com/questions/67163259/use-withcredentialsusernamepassword-in-jenkins-pipeline-library)
+)
 
 [ -z "${page_json:-}" ] && { echo "Empty response for '${PAGE_TITLE}'" >&2; exit 2; }
 
@@ -146,93 +178,86 @@ keycol = int(os.environ.get('KEY_COL','1'))
 tgtcol = int(os.environ.get('TARGET_COL','3'))
 keyval = os.environ.get('KEY_VALUE','').strip()
 newval = os.environ.get('NEW_VALUE','').strip()
-hdrx   = os.environ.get('HEADER_REGEX', '(?i)!\\s*Client\\s*Name\\s*!!\\s*Stack\\s*Name\\s*!!\\s*Nova\\s*Version')
 
-if not keyval or tgtcol < 1 or keycol < 1:
+# Use the HEADER_REGEX from env if provided; otherwise fall back to a raw pattern.
+hdrx_env = os.environ.get('HEADER_REGEX','').strip()
+hdrx = hdrx_env or r'(?i)!\s*Client\s*Name\s*!!\s*Stack\s*Name\s*!!\s*Nova\s*Version'
+
+if not text or not keyval or tgtcol < 1 or keycol < 1:
     print(text); sys.exit(0)
 
-# Locate the table by header (best-effort)
+# ---- Find tables delimited by {| ... |} ----
 tables = []
-start = 0
+pos = 0
 while True:
-    i = text.find('{|', start)
+    i = text.find('{|', pos)
     if i < 0: break
     j = text.find('|}', i)
     if j < 0: break
     tables.append((i, j+2))
-    start = j+2
+    pos = j+2
 
-def display(s):
-    s = s.strip()
-    # Extract display text for [[Page|Text]] or [[Page]]
+def display(cell: str) -> str:
+    """What a human sees: strip bold/italics; for [[Page|Text]] prefer Text."""
+    s = cell.strip()
     if s.startswith('[[') and s.endswith(']]'):
         inner = s[2:-2]
-        parts = inner.split('|', 1)
-        return parts[1] if len(parts)==2 else parts[0]
-    return re.sub(r"''+", "", s).strip()  # drop italics/bold
+        if '|' in inner:
+            return inner.split('|', 1)[1]
+        return inner
+    return re.sub(r"''+", "", s).strip()
 
 updated = False
-for (a,b) in tables:
+
+for a, b in tables:
     tbl = text[a:b]
-    # Check header row
     if not re.search(hdrx, tbl):
         continue
 
-    # Split rows by "\n|-" markers; keep the separators
-    parts = re.split(r'(\\n\\|-.*\\n)', tbl)
-    rebuilt = []
-    for idx,chunk in enumerate(parts):
-        if idx%2 == 1:
-            # row separator (e.g., "\n|- ...\n")
-            rebuilt.append(chunk)
-        else:
-            # a block of one or more rows or header text
-            lines = chunk.splitlines(keepends=True)
-            buf = []
-            rowbuf = []
-            inrow = False
-            def flush_row():
-                nonlocal buf, rowbuf, updated
-                if not rowbuf:
-                    buf.extend([])
-                    return
-                row = ''.join(rowbuf)
-                # Identify data rows that start with '|' (not header '!')
-                if re.search(r'\\n\\|', '\\n'+row) or row.lstrip().startswith('|'):
-                    # Merge continued lines and split cells: first cell starts with '|' and others with '||'
-                    merged = row.replace('\\n|', '||').replace('\\n', '')
-                    if '||' in merged:
-                        cells = merged.split('||')
-                        # Normalize first cell leading '|' if present
-                        if cells[0].startswith('|'): cells[0]=cells[0][1:]
-                        # Trim spaces
-                        cells = [c.strip() for c in cells]
-                        # Only process if enough columns
-                        if len(cells) >= max(keycol, tgtcol):
-                            key = display(cells[keycol-1])
-                            if key == keyval:
-                                cells[tgtcol-1] = newval
-                                updated = True
-                        # Rebuild the row
-                        newrow = '| ' + (' || '.join(cells)) + '\\n'
-                        buf.append(newrow)
-                        rowbuf.clear(); return
-                # default: keep as-is
-                buf.append(row)
-                rowbuf.clear()
+    # ---- Split rows on lines that start with "|-" (keep separators separately) ----
+    row_seps   = re.findall(r'(?m)^\|-\s.*\n?', tbl)
+    row_chunks = re.split  (r'(?m)^\|-\s.*\n?', tbl)
 
-            for ln in lines:
-                # Row content may be on multiple lines; collect until next "|-" or end of chunk
-                if ln.startswith('|-'):
-                    # hit a separator inside this chunk unexpectedly; keep as-is
-                    flush_row()
-                    buf.append(ln); 
-                else:
-                    rowbuf.append(ln)
-            flush_row()
-            rebuilt.append(''.join(buf))
+    rebuilt_rows = []
 
-    newtbl = ''.join(rebuilt)
+    for chunk in row_chunks:
+        if not chunk.strip():
+            rebuilt_rows.append(chunk)
+            continue
+
+        # Coalesce continuations: turn line-leading '|' into ' || ' splits
+        body = chunk.replace('\r\n|', ' || ').replace('\n|', ' || ')
+        data = body.strip()
+
+        # Header row starts with '!' — keep as-is
+        if data.startswith('!'):
+            rebuilt_rows.append(chunk)
+            continue
+
+        # Drop a single leading '|' for data rows
+        if data.startswith('|'):
+            data = data[1:].lstrip()
+
+        cells = [c.strip() for c in data.split(' || ')]
+
+        if len(cells) >= max(keycol, tgtcol):
+            key = display(cells[keycol - 1])
+            if key == keyval:
+                cells[tgtcol - 1] = newval
+                updated = True
+
+        new_row = '| ' + ' || '.join(cells) + '\n'
+        rebuilt_rows.append(new_row)
+
+    # ---- Re‑interleave with their "|-" separators ----
+    out = []
+    for i, row in enumerate(rebuilt_rows):
+        out.append(row)
+        if i < len(row_seps):
+            out.append(row_seps[i])
+
+    newtbl = ''.join(out)
+
     if updated:
         text = text[:a] + newtbl + text[b:]
         break
@@ -242,7 +267,7 @@ PY
 )
 
 if [ "x$OLD_TEXT" = "x$new_text" ]; then
-  echo "==> No change (row not found or already up to date)."
+  echo "==> No change (row not found, or content already up to date)."
   rm -rf "$tmpdir"; exit 0
 fi
 
@@ -268,7 +293,6 @@ _curl -s -X POST "$WIKI_API" \
   --data-urlencode "starttimestamp=${startts}" \
   --data-urlencode "token=${csrf_token}" \
 | python3 -c 'import sys,json; print(json.dumps(json.load(sys.stdin), indent=2))'
-# action=edit is POST-only (with csrf + base/start timestamps) [4](https://stackoverflow.com/questions/2163828/reading-cookies-via-https-that-were-set-using-http)
 
 rm -rf "$tmpdir"
 '''
