@@ -1,9 +1,9 @@
 // vars/wikiTableUpdate.groovy
 //
 // Update a single cell in a MediaWiki table by row key and column number.
-// Typical use: update column 3 ("Nova Version") for a row whose "Client Name" (col 1) is "CIMB MY".
+// Typical use: update column 3 ("Nova Version") for the row whose "Client Name" (col 1) is "CIMB MY".
 //
-// Usage example (from a Jenkinsfile):
+// Example (from a Jenkinsfile):
 //
 //   @Library('mw-lib') _
 //   pipeline {
@@ -67,7 +67,7 @@ def call(Map cfg = [:]) {
       "KEY_VALUE=${keyValue}",
       "TARGET_COL=${targetColumn}",
       "NEW_VALUE=${newValue}",
-      "HEADER_REGEX=${headerRegex}",
+      "HEADER_REGEX=${headerRegex}",   // <-- always provided (no Python-side default anymore)
       "ASSERT_LEVEL=${assertLevel}",
       "LGDOMAIN=${lgdomain}",
       "MARK_BOT=${markBot}",
@@ -178,10 +178,7 @@ keycol = int(os.environ.get('KEY_COL','1'))
 tgtcol = int(os.environ.get('TARGET_COL','3'))
 keyval = os.environ.get('KEY_VALUE','').strip()
 newval = os.environ.get('NEW_VALUE','').strip()
-
-# Use the HEADER_REGEX from env if provided; otherwise fall back to a raw pattern.
-hdrx_env = os.environ.get('HEADER_REGEX','').strip()
-hdrx = hdrx_env or r'(?i)!\s*Client\s*Name\s*!!\s*Stack\s*Name\s*!!\s*Nova\s*Version'
+hdrx   = os.environ.get('HEADER_REGEX','').strip()  # always provided from Groovy
 
 if not text or not keyval or tgtcol < 1 or keycol < 1:
     print(text); sys.exit(0)
@@ -211,7 +208,7 @@ updated = False
 
 for a, b in tables:
     tbl = text[a:b]
-    if not re.search(hdrx, tbl):
+    if hdrx and not re.search(hdrx, tbl):
         continue
 
     # ---- Split rows on lines that start with "|-" (keep separators separately) ----
