@@ -5,7 +5,7 @@ pipeline {
     // Prefer https://.../api.php if your site supports TLS
     WIKI_API        = 'http://novawiki.novastp.com/wiki/novadoc/api.php'
 
-    PAGE_TITLE      = 'OCBC_NOVA4-00-03-70-Bonds'   // exact page title
+    PAGE_TITLE      = 'TestNtier'   // exact page title
     SECTION_ID      = ''                             // e.g. '3' or '0' (lead); leave empty to resolve by heading
     SECTION_HEADING = 'Jenkins Build Status'         // used if SECTION_ID is empty
     MODE            = 'append'                       // 'append' or 'replace'
@@ -104,7 +104,7 @@ print(next((s.get("index","") for s in sec.get("parse",{}).get("sections",[]) if
             echo "==> Target section: ${target_section:-<unset>}"
 
             # ---------- Compose the text ----------
-            new_line="* Build ${BUILD_NUMBER} — ${BUILD_STATUS:-SUCCESS} on job '${JOB_NAME}' at $(date -u +'%Y-%m-%d %H:%M:%SZ')"
+            new_line="* Build ${BUILD_NUMBER} — ${BUILD_STATUS:-SUCCESS} on job '${JOB_NAME}' at $(date -u +'%Y-%m-%d %H:%M:%SZ') <br>"
 
             if [ "${MODE}" = "append" ] && [ "${target_section}" != "new" ]; then
               current=$(_curl -sG "$WIKI_API" \
