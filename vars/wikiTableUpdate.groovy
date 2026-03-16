@@ -67,7 +67,7 @@ def call(Map cfg = [:]) {
       "KEY_VALUE=${keyValue}",
       "TARGET_COL=${targetColumn}",
       "NEW_VALUE=${newValue}",
-      "HEADER_REGEX=${headerRegex}",   // <-- always provided (no Python-side default anymore)
+      "HEADER_REGEX=${headerRegex}",   // always provided from Groovy
       "ASSERT_LEVEL=${assertLevel}",
       "LGDOMAIN=${lgdomain}",
       "MARK_BOT=${markBot}",
@@ -202,7 +202,7 @@ def display(cell: str) -> str:
         if '|' in inner:
             return inner.split('|', 1)[1]
         return inner
-    return re.sub(r"''+", "", s).strip()
+    return re.sub("''+", "", s).strip()
 
 updated = False
 
@@ -212,8 +212,8 @@ for a, b in tables:
         continue
 
     # ---- Split rows on lines that start with "|-" (keep separators separately) ----
-    row_seps   = re.findall(r'(?m)^\|-\s.*\n?', tbl)
-    row_chunks = re.split  (r'(?m)^\|-\s.*\n?', tbl)
+    row_seps   = re.findall('(?m)^\\|-\\s.*\\n?', tbl)
+    row_chunks = re.split  ('(?m)^\\|-\\s.*\\n?', tbl)
 
     rebuilt_rows = []
 
@@ -223,7 +223,7 @@ for a, b in tables:
             continue
 
         # Coalesce continuations: turn line-leading '|' into ' || ' splits
-        body = chunk.replace('\r\n|', ' || ').replace('\n|', ' || ')
+        body = chunk.replace('\\r\\n|', ' || ').replace('\\n|', ' || ')
         data = body.strip()
 
         # Header row starts with '!' — keep as-is
@@ -243,7 +243,7 @@ for a, b in tables:
                 cells[tgtcol - 1] = newval
                 updated = True
 
-        new_row = '| ' + ' || '.join(cells) + '\n'
+        new_row = '| ' + ' || '.join(cells) + '\\n'
         rebuilt_rows.append(new_row)
 
     # ---- Re‑interleave with their "|-" separators ----
