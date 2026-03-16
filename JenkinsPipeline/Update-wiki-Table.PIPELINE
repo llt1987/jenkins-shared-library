@@ -181,7 +181,7 @@ def split_attr_prefix(cell: str):
 
 def display(cell_content: str) -> str:
     """Human-visible text: drop ''bold/italics''; [[Page|Text]] → Text."""
-    s = re.sub(r"''+", "", cell_content).strip()
+    s = re.sub("''+", "", cell_content).strip()
     if s.startswith('[[') and s.endswith(']]'):
         inner = s[2:-2]
         if '|' in inner:
@@ -207,6 +207,23 @@ def normalize_cells(block: str) -> str:
     body = re.sub(r'^(?:\\s*\\|\\|\\s*)+', '', body)  # drop leading delimiters
     return body.strip()
 
+def peel_trailing_end(block: str):
+    """
+    If the row chunk ends with a table-closing line, return (content_without_end, end_line_with_original_newlines).
+    Accepts '|}' or '| }' (with optional spaces) and preserves the exact bytes we found.
+    """
+    lines = block.splitlines(True)  # keep line endings
+    k = len(lines) - 1
+    trail = ''
+    while k >= 0 and lines[k].strip() == '':
+        trail = lines[k] + trail
+        k -= 1
+    if k >= 0 and re.match('^\\s*\\|\\s*}\\s*$', lines[k]):
+        end_line = lines[k] + trail
+        content  = ''.join(lines[:k])
+        return content, end_line
+    return block, ''  # no closing line
+
 # ---- Robust row delimiter (optional leading spaces, optional attributes) ----
 row_sep_re = re.compile('(?m)^[ \\t]*\\|\\-[^\\n]*$')
 
@@ -220,15 +237,17 @@ for a, b in tables:
     if diag:
         sample = []
         for ch in row_sep_re.split(tbl):
-            if any(line.lstrip().startswith('|+') for line in ch.splitlines()):  # skip captions
+            # drop any closing line from the chunk before normalization
+            content_only, _ = peel_trailing_end(ch)
+            if any(line.lstrip().startswith('|+') for line in content_only.splitlines()):  # skip captions
                 continue
-            body = normalize_cells(ch)
+            body = normalize_cells(content_only)
             if not body or body.lstrip().startswith('!'):
                 continue
             cells = [c.strip() for c in body.split(' || ') if c.strip()]
             disp_cells = []
             for c in cells:
-                _, cont = split_attr_prefix(c)   # remove prefix for display
+                _, cont = split_attr_prefix(c)
                 disp_cells.append(cont)
             if len(disp_cells) >= keycol:
                 sample.append(display(disp_cells[keycol-1]))
@@ -249,17 +268,20 @@ for a, b in tables:
             rebuilt_rows.append(chunk)
             continue
 
-        if any(line.lstrip().startswith('|+') for line in chunk.splitlines()):
-            rebuilt_rows.append(chunk)  # keep caption as-is
+        # peel closing line (|} or '| }') so we never normalize it
+        content_only, end_line = peel_trailing_end(chunk)
+
+        if any(line.lstrip().startswith('|+') for line in content_only.splitlines()):
+            rebuilt_rows.append(content_only + end_line)  # keep caption + closing intact
             continue
 
-        body = normalize_cells(chunk)
+        body = normalize_cells(content_only)
         if not body:
-            rebuilt_rows.append(chunk)
+            rebuilt_rows.append(content_only + end_line)
             continue
 
         if body.lstrip().startswith('!'):
-            rebuilt_rows.append(chunk)  # header row
+            rebuilt_rows.append(content_only + end_line)  # header row
             continue
 
         cells_raw = [c.strip() for c in body.split(' || ') if c.strip()]  # drop empties
@@ -274,7 +296,7 @@ for a, b in tables:
 
         if len(cells_prefixed) >= max(keycol, tgtcol):
             if display_for_match[keycol - 1] == keyval:
-                # Replace only content; leave any attribute prefix (e.g., rowspan="3"| ) intact
+                # Replace only content; leave any attribute prefix intact
                 cells_prefixed[tgtcol - 1][1] = newval
                 updated = True
 
@@ -283,15 +305,15 @@ for a, b in tables:
         for pref, cont in cells_prefixed:
             out_cells.append((pref or '') + cont)
         new_row = '| ' + ' || '.join(out_cells) + '\\n'
-        rebuilt_rows.append(new_row)
+        rebuilt_rows.append(new_row + end_line)   # append original closing line (if any)
 
     # ---- Interleave rows with their original "|-" separators, each on its own line ----
     out = []
     for i, row in enumerate(rebuilt_rows):
-        out.append(row)                                 # row ends with \\n
+        out.append(row)                                 # row ends with \\n (or includes end_line)
         if i < len(row_seps):
             sep = row_seps[i].rstrip('\\r\\n')
-            out.append(sep + '\\n')                     # force separator on its own line
+            out.append(sep + '\\n')                     # ensure '|-' is on its own line
     newtbl = ''.join(out)
 
     if updated:
@@ -336,7 +358,7 @@ _curl -s -X POST "$WIKI_API" \
 
   post {
     always {
-      echo 'Done. If nothing changed, review diagnostics for header match and SAMPLE keys.'
+      echo 'Done. If nothing changed, review diagnostics for header match and sample keys.'
     }
   }
 }
