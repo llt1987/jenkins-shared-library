@@ -216,7 +216,7 @@ def display(cell: str) -> str:
 updated = False
 
 # Precompiled pattern for row separators (no raw strings; double-escaped backslashes)
-row_sep_pattern = '(?m)^\\|-\\s.*\\n?'
+row_sep_pattern = '(?m)^[|]-\\s.*\\n?
 
 for a, b in tables:
     tbl = text[a:b]
