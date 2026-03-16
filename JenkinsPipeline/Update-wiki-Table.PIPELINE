@@ -10,9 +10,9 @@ pipeline {
     choice(name: 'KEY_COLUMN',   choices: ['1','2'], description: 'Column to match: 1 = Client Name, 2 = Stack Name')
     string(name: 'KEY_VALUE',    defaultValue: 'CIMB MY', description: 'Display text in the chosen column to identify the row')
     string(name: 'NEW_VERSION',  defaultValue: '[[NOVA7-00-01-164]]', description: 'Wikitext to put in column 3 (Nova Version)')
-    // Default header:  ! Client Name !! Stack Name !! Nova Version
-    // If your header cells use styles (e.g., ! style="..." | Client Name), either leave blank to scan all tables,
-    // or use a tolerant pattern such as:
+    // Default header matches:  ! Client Name !! Stack Name !! Nova Version
+    // If your header cells are styled (e.g., ! style="..." | Client Name), either leave blank to scan all tables
+    // or use this tolerant pattern:
     // (?is)!\\s*(?:[^\\n|]*\\|\\s*)?Client\\s*Name.*?!!\\s*(?:[^\\n|]*\\|\\s*)?Stack\\s*Name.*?!!\\s*(?:[^\\n|]*\\|\\s*)?Nova\\s*Version
     string(name: 'HEADER_REGEX', defaultValue: '(?i)!\\s*Client\\s*Name\\s*!!\\s*Stack\\s*Name\\s*!!\\s*Nova\\s*Version', description: 'Regex to select the table header (leave empty to scan all tables)')
     booleanParam(name: 'DRY_RUN', defaultValue: true, description: 'If true, do not save (diagnostics only)')
@@ -22,13 +22,11 @@ pipeline {
   stages {
     stage('Update Nova Version in table (column 3)') {
       steps {
-        withCredentials([
-          usernamePassword(
-            credentialsId: 'mediawiki-bot-creds',   // Username: RealUser@BotName ; Password: Bot Password
-            usernameVariable: 'WIKI_USER',
-            passwordVariable: 'WIKI_PASS'
-          )
-        ]) {
+        withCredentials([usernamePassword(
+          credentialsId: 'mediawiki-bot-creds',   // Username: RealUser@BotName ; Password: Bot Password
+          usernameVariable: 'WIKI_USER',
+          passwordVariable: 'WIKI_PASS'
+        )]) {
           withEnv([
             "WIKI_API=${params.WIKI_API}",
             "PAGE_TITLE=${params.PAGE_TITLE}",
@@ -42,6 +40,7 @@ pipeline {
             "ASSERT_LEVEL=user",   // change to 'bot' only if your account has the bot right
             "LGDOMAIN="            // set only if your wiki requires a domain at login (e.g., LDAP/AD)
           ]) {
+
             sh '''#!/bin/sh
 set -eu
 
@@ -65,7 +64,7 @@ login_token=$(
   | python3 -c 'import sys,json; print(json.load(sys.stdin)["query"]["tokens"]["logintoken"])'
 )
 
-echo "==> 2) Login (Bot Password supported: RealUser@BotName)"
+echo "==> 2) Login"
 args="
   --data-urlencode action=login
   --data-urlencode format=json
@@ -108,7 +107,6 @@ page_json=$(_curl -sG "$WIKI_API" \
 )
 
 [ -z "${page_json:-}" ] && { echo "ERROR: Empty response for '${PAGE_TITLE}'" >&2; exit 2; }
-
 export PAGE_JSON="$page_json" KEY_COL TARGET_COL KEY_VALUE NEW_VALUE HEADER_REGEX DIAG
 
 old_text=$(
@@ -150,15 +148,14 @@ keycol = int(os.environ.get('KEY_COL','1'))
 tgtcol = int(os.environ.get('TARGET_COL','3'))
 keyval = os.environ.get('KEY_VALUE','').strip()
 newval = os.environ.get('NEW_VALUE','').strip()
-hdrx   = os.environ.get('HEADER_REGEX','').strip()     # provided by Jenkins params
+hdrx   = os.environ.get('HEADER_REGEX','').strip()
 diag   = os.environ.get('DIAG','true').lower() in ('1','true','yes')
 
 if not text or not keyval or tgtcol < 1 or keycol < 1:
     print(text); sys.exit(0)
 
-# ---- Find tables delimited by {| ... |} ----
-tables = []
-pos = 0
+# ---- Locate complete tables ({| ... |}) ----
+tables, pos = [], 0
 while True:
     i = text.find('{|', pos)
     if i < 0: break
@@ -167,16 +164,22 @@ while True:
     tables.append((i, j+2))
     pos = j+2
 
-def strip_attrs(cell: str) -> str:
-    """Drop cell attributes like:  rowspan=\"3\" | content  -> content"""
-    # split at the first ' | ' (space-pipe-space) which separates attrs from content
-    k = cell.find(' | ')
-    return cell[k+3:].strip() if k != -1 else cell.strip()
+def split_attr_prefix(cell: str):
+    """
+    Split a cell into:
+      prefix (attributes incl. the delimiting '|' and any following spaces), e.g. 'rowspan="3"| '
+      content (the remainder).
+    We treat leading attributes only if we see '=' before the first pipe.
+    """
+    s = cell.lstrip()
+    m = re.match(r'^([A-Za-z][^|]*?=[^|]*?)(\\|\\s*)(.*)$', s)
+    if m:
+        return m.group(1) + m.group(2), m.group(3).strip()
+    return '', cell.strip()
 
-def display(cell: str) -> str:
-    """Return user-visible text: strip bold/italics; handle [[Page|Text]] -> Text."""
-    s = cell.strip()
-    s = re.sub("''+", "", s).strip()
+def display(cell_content: str) -> str:
+    """Human-visible text: drop ''bold/italics''; [[Page|Text]] → Text."""
+    s = re.sub("''+", "", cell_content).strip()
     if s.startswith('[[') and s.endswith(']]'):
         inner = s[2:-2]
         if '|' in inner:
@@ -186,65 +189,66 @@ def display(cell: str) -> str:
 
 def normalize_cells(block: str) -> str:
     """
-    - Convert any line-leading '|' (with optional spaces) to a single cell break.
-    - Ensure all '||' become ' || ' so splitting on ' || ' works even if no spaces were present.
+    1) For any line-leading '|' (after optional spaces), insert one uniform cell break.
+    2) Normalize inline '||' (with/without spaces) to ' || '.
+    3) Remove any leading '||' at the start of the block (prevents empty first token).
     """
     lines = []
     for ln in block.splitlines():
-        t = ln.lstrip(' \\t')
-        if t.startswith('|'):
-            # replace the first '|' on the line with ' || '
+        raw = ln.lstrip(' \\t')
+        if raw.startswith('|') and not raw.startswith('|+'):  # not a caption
             idx = ln.find('|')
             ln  = ln[:idx] + ' || ' + ln[idx+1:]
         lines.append(ln)
     body = '\\n'.join(lines)
     body = body.replace('||', ' || ')
+    body = re.sub(r'^(?:\\s*\\|\\|\\s*)+', '', body)  # drop leading delimiters
     return body.strip()
 
-updated = False
+# ---- Robust row delimiter (optional leading spaces, optional attributes) ----
+row_sep_re = re.compile('(?m)^[ \\t]*\\|\\-[^\\n]*$')
 
-# ---- Robust row-separator (handles leading spaces and optional attributes after "|-") ----
-row_sep_re = re.compile('(?m)^[ \\t]*[|]-[^\\n]*$')
+updated = False
 
 for a, b in tables:
     tbl = text[a:b]
     header_ok = (not hdrx) or bool(re.search(hdrx, tbl))
 
-    # ---- Diagnostics: sample keys from the match column (max 5) ----
+    # ---- Diagnostics: sample keys (col keycol) ----
     if diag:
-        sample_keys = []
+        sample = []
         for ch in row_sep_re.split(tbl):
-            # Skip caption sections that start with "|+"
-            if any(line.lstrip().startswith('|+') for line in ch.splitlines()):
+            if any(line.lstrip().startswith('|+') for line in ch.splitlines()):  # skip captions
                 continue
             body = normalize_cells(ch)
             if not body or body.lstrip().startswith('!'):
                 continue
-            cells = [c.strip() for c in body.split(' || ')]
-            # Strip cell attributes before display
-            cells = [strip_attrs(c) for c in cells]
-            if len(cells) >= keycol:
-                sample_keys.append(display(cells[keycol-1]))
-            if len(sample_keys) >= 5:
-                break
-        print(f"[#] Table candidate header_match={header_ok} sample keys (col {keycol}): {sample_keys}", file=sys.stderr)
+            cells = [c.strip() for c in body.split(' || ') if c.strip()]
+            disp_cells = []
+            for c in cells:
+                _, cont = split_attr_prefix(c)   # remove prefix for display
+                disp_cells.append(cont)
+            if len(disp_cells) >= keycol:
+                sample.append(display(disp_cells[keycol-1]))
+            if len(sample) >= 5: break
+        print(f"[#] Table candidate header_match={header_ok} sample keys (col {keycol}): {sample}", file=sys.stderr)
 
     if not header_ok:
         continue
 
-    # ---- Split rows and rebuild with changes only when our key matches ----
+    # ---- Split rows, rebuild with content-only change in target column ----
     row_seps   = row_sep_re.findall(tbl)
     row_chunks = row_sep_re.split  (tbl)
 
     rebuilt_rows = []
+
     for chunk in row_chunks:
         if not chunk.strip():
             rebuilt_rows.append(chunk)
             continue
 
-        # Skip caption blocks (|+ ...)
         if any(line.lstrip().startswith('|+') for line in chunk.splitlines()):
-            rebuilt_rows.append(chunk)
+            rebuilt_rows.append(chunk)  # keep caption as-is
             continue
 
         body = normalize_cells(chunk)
@@ -252,25 +256,33 @@ for a, b in tables:
             rebuilt_rows.append(chunk)
             continue
 
-        # Header row begins with '!' — keep as-is
         if body.lstrip().startswith('!'):
-            rebuilt_rows.append(chunk)
+            rebuilt_rows.append(chunk)  # header row
             continue
 
-        cells = [c.strip() for c in body.split(' || ')]
-        # Strip per-cell attributes before comparison/update
-        cells = [strip_attrs(c) for c in cells]
+        cells_raw = [c.strip() for c in body.split(' || ') if c.strip()]  # drop empties
 
-        if len(cells) >= max(keycol, tgtcol):
-            key = display(cells[keycol - 1])
-            if key == keyval:
-                cells[tgtcol - 1] = newval
+        # Preserve attributes; only content may change
+        cells_prefixed = []
+        display_for_match = []
+        for c in cells_raw:
+            pref, cont = split_attr_prefix(c)
+            cells_prefixed.append([pref, cont])  # mutable pair
+            display_for_match.append(display(cont))
+
+        if len(cells_prefixed) >= max(keycol, tgtcol):
+            if display_for_match[keycol - 1] == keyval:
+                cells_prefixed[tgtcol - 1][1] = newval
                 updated = True
 
-        new_row = '| ' + ' || '.join(cells) + '\\n'
+        # Rebuild row with original prefixes + (maybe) updated content
+        out_cells = []
+        for pref, cont in cells_prefixed:
+            out_cells.append((pref or '') + cont)
+        new_row = '| ' + ' || '.join(out_cells) + '\\n'
         rebuilt_rows.append(new_row)
 
-    # Re‑interleave with their "|-" separators
+    # Interleave with original row separators
     out = []
     for i, row in enumerate(rebuilt_rows):
         out.append(row)
@@ -321,7 +333,7 @@ _curl -s -X POST "$WIKI_API" \
 
   post {
     always {
-      echo 'Done. If nothing changed, review diagnostics for header match and sample keys.'
+      echo 'Done. If nothing changed, review diagnostics for header match and SAMPLE keys.'
     }
   }
 }
