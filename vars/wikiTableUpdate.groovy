@@ -1,7 +1,10 @@
 // vars/wikiTableUpdate.groovy
 //
-// Update a single cell in a MediaWiki table by row key and column number.
-// Typical use: update column 3 ("Nova Version") for the row whose "Client Name" (col 1) is "CIMB MY".
+// Update a single cell in a MediaWiki table by row key and column number,
+// and print diagnostic "sample keys" from the target column (Patch 2).
+//
+// Typical use: update column 3 ("Nova Version") for the row whose
+// "Client Name" (col 1) is "CIMB MY".
 //
 // Example (from a Jenkinsfile):
 //
@@ -21,7 +24,8 @@
 //             credentialsId: 'mediawiki-bot-creds',  // Username: RealUser@BotName ; Password: Bot Password
 //             assertLevel:   'user',
 //             markBot:       false,
-//             dryRun:        false
+//             dryRun:        false,
+//             diag:          true                    // Patch 2 diagnostics (default true)
 //           )
 //         }
 //       }
@@ -51,6 +55,9 @@ def call(Map cfg = [:]) {
   String editSummary   = (cfg.editSummary ?: "Update column ${targetColumn} for '${keyValue}'").trim()
   boolean dryRun       = (cfg.containsKey('dryRun') ? cfg.dryRun : false) as boolean
 
+  // -------- Patch 2: diagnostics switch (default true) --------
+  boolean diag         = (cfg.containsKey('diag') ? cfg.diag : true) as boolean
+
   if (!wikiApi)   error "wikiTableUpdate: 'wikiApi' is required."
   if (!pageTitle) error "wikiTableUpdate: 'pageTitle' is required."
   if (!keyValue)  error "wikiTableUpdate: 'keyValue' (the row key) is required."
@@ -72,7 +79,8 @@ def call(Map cfg = [:]) {
       "LGDOMAIN=${lgdomain}",
       "MARK_BOT=${markBot}",
       "DRY_RUN=${dryRun}",
-      "EDIT_SUMMARY=${editSummary}"
+      "EDIT_SUMMARY=${editSummary}",
+      "TABLE_DIAG=${diag}"             // Patch 2 diagnostics toggle
     ]) {
       sh '''#!/bin/sh
 set -eu
@@ -137,7 +145,7 @@ page_json=$(_curl -sG "$WIKI_API" \
 
 [ -z "${page_json:-}" ] && { echo "Empty response for '${PAGE_TITLE}'" >&2; exit 2; }
 
-export PAGE_JSON="$page_json" KEY_COL TARGET_COL KEY_VALUE NEW_VALUE HEADER_REGEX
+export PAGE_JSON="$page_json" KEY_COL TARGET_COL KEY_VALUE NEW_VALUE HEADER_REGEX TABLE_DIAG
 
 old_text=$(
   python3 - <<'PY'
@@ -178,7 +186,8 @@ keycol = int(os.environ.get('KEY_COL','1'))
 tgtcol = int(os.environ.get('TARGET_COL','3'))
 keyval = os.environ.get('KEY_VALUE','').strip()
 newval = os.environ.get('NEW_VALUE','').strip()
-hdrx   = os.environ.get('HEADER_REGEX','').strip()  # always provided from Groovy
+hdrx   = os.environ.get('HEADER_REGEX','').strip()     # provided from Groovy
+diag   = os.environ.get('TABLE_DIAG','true').lower() in ('1','true','yes')
 
 if not text or not keyval or tgtcol < 1 or keycol < 1:
     print(text); sys.exit(0)
@@ -206,14 +215,35 @@ def display(cell: str) -> str:
 
 updated = False
 
+# Precompiled pattern for row separators (no raw strings; double-escaped backslashes)
+row_sep_pattern = '(?m)^\\|-\\s.*\\n?'
+
 for a, b in tables:
     tbl = text[a:b]
-    if hdrx and not re.search(hdrx, tbl):
+    header_ok = (not hdrx) or bool(re.search(hdrx, tbl))
+
+    # ---- Patch 2: diagnostics (print sample keys from the match column) ----
+    if diag:
+        sample_keys = []
+        for ch in re.split(row_sep_pattern, tbl):
+            body = ch.replace('\\r\\n|', ' || ').replace('\\n|', ' || ').strip()
+            if not body or body.startswith('!'):
+                continue
+            if body.startswith('|'):
+                body = body[1:].lstrip()
+            cells = [c.strip() for c in body.split(' || ')]
+            if len(cells) >= keycol:
+                sample_keys.append(display(cells[keycol-1]))
+            if len(sample_keys) >= 5:
+                break
+        print(f"[#] Table candidate header_match={header_ok} sample keys (col {keycol}): {sample_keys}", file=sys.stderr)
+
+    if not header_ok:
         continue
 
     # ---- Split rows on lines that start with "|-" (keep separators separately) ----
-    row_seps   = re.findall('(?m)^\\|-\\s.*\\n?', tbl)
-    row_chunks = re.split  ('(?m)^\\|-\\s.*\\n?', tbl)
+    row_seps   = re.findall(row_sep_pattern, tbl)
+    row_chunks = re.split  (row_sep_pattern, tbl)
 
     rebuilt_rows = []
 
