@@ -1,0 +1,327 @@
+// Jenkinsfile - Timer Trigger Test for getUserId (closure-safe, NPE-proof)
+@Library('my-shared-lib') _
+
+pipeline {
+  agent { label "Agent1"}
+
+  parameters {
+    string(name: 'WIKI_API',     defaultValue: 'http://novawiki.novastp.com/wiki/novadoc/api.php', description: 'MediaWiki Action API endpoint')
+    string(name: 'PAGE_TITLE',   defaultValue: 'TestNtier', description: 'Wiki page to update')
+    choice(name: 'KEY_COLUMN',   choices: ['1','2'], description: 'Column to match: 1 = Client Name, 2 = Stack Name')
+    string(name: 'KEY_VALUE',    defaultValue: 'CIMB MY', description: 'Display text in the chosen column to identify the row')
+    string(name: 'NEW_VERSION',  defaultValue: '[[NOVA7-00-01-164]]', description: 'Wikitext to put in column 3 (Nova Version)')
+    // Default header:  ! Client Name !! Stack Name !! Nova Version
+    // If your header cells use styles (e.g., ! style="..." | Client Name), either leave blank to scan all tables,
+    // or use a tolerant pattern such as:
+    // (?is)!\\s*(?:[^\\n|]*\\|\\s*)?Client\\s*Name.*?!!\\s*(?:[^\\n|]*\\|\\s*)?Stack\\s*Name.*?!!\\s*(?:[^\\n|]*\\|\\s*)?Nova\\s*Version
+    string(name: 'HEADER_REGEX', defaultValue: '(?i)!\\s*Client\\s*Name\\s*!!\\s*Stack\\s*Name\\s*!!\\s*Nova\\s*Version', description: 'Regex to select the table header (leave empty to scan all tables)')
+    booleanParam(name: 'DRY_RUN', defaultValue: true, description: 'If true, do not save (diagnostics only)')
+    booleanParam(name: 'DIAG',    defaultValue: true, description: 'Print sample keys from the match column (stderr)')
+  }
+
+  stages {
+    stage('Update Nova Version in table (column 3)') {
+      steps {
+        withCredentials([
+          usernamePassword(
+            credentialsId: 'mediawiki-bot-creds',   // Username: RealUser@BotName ; Password: Bot Password
+            usernameVariable: 'WIKI_USER',
+            passwordVariable: 'WIKI_PASS'
+          )
+        ]) {
+          withEnv([
+            "WIKI_API=${params.WIKI_API}",
+            "PAGE_TITLE=${params.PAGE_TITLE}",
+            "KEY_COL=${params.KEY_COLUMN}",
+            "KEY_VALUE=${params.KEY_VALUE}",
+            "TARGET_COL=3",
+            "NEW_VALUE=${params.NEW_VERSION}",
+            "HEADER_REGEX=${params.HEADER_REGEX}",
+            "DRY_RUN=${params.DRY_RUN}",
+            "DIAG=${params.DIAG}",
+            "ASSERT_LEVEL=user",   // change to 'bot' only if your account has the bot right
+            "LGDOMAIN="            // set only if your wiki requires a domain at login (e.g., LDAP/AD)
+          ]) {
+            sh '''#!/bin/sh
+set -eu
+
+need() { command -v "$1" >/dev/null 2>&1 || { echo "Missing: $1" >&2; exit 2; }; }
+need curl; need python3
+
+tmpdir="$(mktemp -d)"
+cookiejar="$tmpdir/cookies.txt"
+cleanup() { rm -rf "$tmpdir"; }
+trap cleanup EXIT
+
+_curl() { curl -fSL --retry 2 --retry-delay 2 -b "$cookiejar" -c "$cookiejar" "$@"; }
+
+echo "==> 1) Get login token"
+login_token=$(
+  _curl -sG "$WIKI_API" \
+    --data-urlencode action=query \
+    --data-urlencode meta=tokens \
+    --data-urlencode type=login \
+    --data-urlencode format=json \
+  | python3 -c 'import sys,json; print(json.load(sys.stdin)["query"]["tokens"]["logintoken"])'
+)
+
+echo "==> 2) Login (Bot Password supported: RealUser@BotName)"
+args="
+  --data-urlencode action=login
+  --data-urlencode format=json
+  --data-urlencode lgname=${WIKI_USER}
+  --data-urlencode lgpassword=${WIKI_PASS}
+  --data-urlencode lgtoken=${login_token}
+"
+[ -n "${LGDOMAIN:-}" ] && args="$args --data-urlencode lgdomain=${LGDOMAIN}"
+_curl -s -X POST "$WIKI_API" $args >/dev/null
+
+echo "==> 3) Verify session"
+who_json=$(_curl -sG "$WIKI_API" \
+  --data-urlencode action=query \
+  --data-urlencode meta=userinfo \
+  --data-urlencode format=json)
+who=$(printf %s "$who_json" | python3 -c 'import sys,json; j=json.load(sys.stdin); print(j.get("query",{}).get("userinfo",{}).get("name",""))')
+if [ -z "$who" ] || printf %s "$who" | grep -Eq "^[0-9]+(\\.[0-9]+){3}$"; then
+  echo "ERROR: Still anonymous; ensure HTTPS endpoint and valid credentials." >&2
+  exit 2
+fi
+echo "    Logged in as: $who"
+
+echo "==> 4) CSRF token"
+csrf_token=$(_curl -sG "$WIKI_API" \
+  --data-urlencode action=query \
+  --data-urlencode meta=tokens \
+  --data-urlencode format=json \
+  | python3 -c 'import sys,json; print(json.load(sys.stdin)["query"]["tokens"]["csrftoken"])'
+)
+
+echo "==> 5) Read page"
+page_json=$(_curl -sG "$WIKI_API" \
+  --data-urlencode action=query \
+  --data-urlencode prop=revisions \
+  --data-urlencode rvslots=main \
+  --data-urlencode 'rvprop=content|timestamp' \
+  --data-urlencode "titles=${PAGE_TITLE}" \
+  --data-urlencode format=json \
+  --data-urlencode formatversion=2
+)
+
+[ -z "${page_json:-}" ] && { echo "ERROR: Empty response for '${PAGE_TITLE}'" >&2; exit 2; }
+
+export PAGE_JSON="$page_json" KEY_COL TARGET_COL KEY_VALUE NEW_VALUE HEADER_REGEX DIAG
+
+old_text=$(
+  python3 - <<'PY'
+import os, json
+d=json.loads(os.environ['PAGE_JSON'])
+try:
+    rev=d["query"]["pages"][0]["revisions"][0]
+    print(rev.get("slots",{}).get("main",{}).get("content",""))
+except Exception:
+    print("", end="")
+PY
+)
+
+basets=$(
+  python3 - <<'PY'
+import os, json
+d=json.loads(os.environ['PAGE_JSON'])
+try:
+    print(d["query"]["pages"][0]["revisions"][0].get("timestamp",""))
+except Exception:
+    print("", end="")
+PY
+)
+
+if [ -z "${basets:-}" ]; then
+  echo "ERROR: No basetimestamp found for '${PAGE_TITLE}'." >&2
+  exit 2
+fi
+
+echo "==> 6) Update table (column ${TARGET_COL}) for key '${KEY_VALUE}'"
+export OLD_TEXT="$old_text"
+new_text=$(
+  python3 - <<'PY'
+import os, re, sys
+
+text   = os.environ.get('OLD_TEXT','')
+keycol = int(os.environ.get('KEY_COL','1'))
+tgtcol = int(os.environ.get('TARGET_COL','3'))
+keyval = os.environ.get('KEY_VALUE','').strip()
+newval = os.environ.get('NEW_VALUE','').strip()
+hdrx   = os.environ.get('HEADER_REGEX','').strip()     # provided by Jenkins params
+diag   = os.environ.get('DIAG','true').lower() in ('1','true','yes')
+
+if not text or not keyval or tgtcol < 1 or keycol < 1:
+    print(text); sys.exit(0)
+
+# ---- Find tables delimited by {| ... |} ----
+tables = []
+pos = 0
+while True:
+    i = text.find('{|', pos)
+    if i < 0: break
+    j = text.find('|}', i)
+    if j < 0: break
+    tables.append((i, j+2))
+    pos = j+2
+
+def strip_attrs(cell: str) -> str:
+    """Drop cell attributes like:  rowspan=\"3\" | content  -> content"""
+    # split at the first ' | ' (space-pipe-space) which separates attrs from content
+    k = cell.find(' | ')
+    return cell[k+3:].strip() if k != -1 else cell.strip()
+
+def display(cell: str) -> str:
+    """Return user-visible text: strip bold/italics; handle [[Page|Text]] -> Text."""
+    s = cell.strip()
+    s = re.sub("''+", "", s).strip()
+    if s.startswith('[[') and s.endswith(']]'):
+        inner = s[2:-2]
+        if '|' in inner:
+            return inner.split('|', 1)[1].strip()
+        return inner.strip()
+    return s
+
+def normalize_cells(block: str) -> str:
+    """
+    - Convert any line-leading '|' (with optional spaces) to a single cell break.
+    - Ensure all '||' become ' || ' so splitting on ' || ' works even if no spaces were present.
+    """
+    lines = []
+    for ln in block.splitlines():
+        t = ln.lstrip(' \\t')
+        if t.startswith('|'):
+            # replace the first '|' on the line with ' || '
+            idx = ln.find('|')
+            ln  = ln[:idx] + ' || ' + ln[idx+1:]
+        lines.append(ln)
+    body = '\\n'.join(lines)
+    body = body.replace('||', ' || ')
+    return body.strip()
+
+updated = False
+
+# ---- Robust row-separator (handles leading spaces and optional attributes after "|-") ----
+row_sep_re = re.compile('(?m)^[ \\t]*[|]-[^\\n]*$')
+
+for a, b in tables:
+    tbl = text[a:b]
+    header_ok = (not hdrx) or bool(re.search(hdrx, tbl))
+
+    # ---- Diagnostics: sample keys from the match column (max 5) ----
+    if diag:
+        sample_keys = []
+        for ch in row_sep_re.split(tbl):
+            # Skip caption sections that start with "|+"
+            if any(line.lstrip().startswith('|+') for line in ch.splitlines()):
+                continue
+            body = normalize_cells(ch)
+            if not body or body.lstrip().startswith('!'):
+                continue
+            cells = [c.strip() for c in body.split(' || ')]
+            # Strip cell attributes before display
+            cells = [strip_attrs(c) for c in cells]
+            if len(cells) >= keycol:
+                sample_keys.append(display(cells[keycol-1]))
+            if len(sample_keys) >= 5:
+                break
+        print(f"[#] Table candidate header_match={header_ok} sample keys (col {keycol}): {sample_keys}", file=sys.stderr)
+
+    if not header_ok:
+        continue
+
+    # ---- Split rows and rebuild with changes only when our key matches ----
+    row_seps   = row_sep_re.findall(tbl)
+    row_chunks = row_sep_re.split  (tbl)
+
+    rebuilt_rows = []
+    for chunk in row_chunks:
+        if not chunk.strip():
+            rebuilt_rows.append(chunk)
+            continue
+
+        # Skip caption blocks (|+ ...)
+        if any(line.lstrip().startswith('|+') for line in chunk.splitlines()):
+            rebuilt_rows.append(chunk)
+            continue
+
+        body = normalize_cells(chunk)
+        if not body:
+            rebuilt_rows.append(chunk)
+            continue
+
+        # Header row begins with '!' — keep as-is
+        if body.lstrip().startswith('!'):
+            rebuilt_rows.append(chunk)
+            continue
+
+        cells = [c.strip() for c in body.split(' || ')]
+        # Strip per-cell attributes before comparison/update
+        cells = [strip_attrs(c) for c in cells]
+
+        if len(cells) >= max(keycol, tgtcol):
+            key = display(cells[keycol - 1])
+            if key == keyval:
+                cells[tgtcol - 1] = newval
+                updated = True
+
+        new_row = '| ' + ' || '.join(cells) + '\\n'
+        rebuilt_rows.append(new_row)
+
+    # Re‑interleave with their "|-" separators
+    out = []
+    for i, row in enumerate(rebuilt_rows):
+        out.append(row)
+        if i < len(row_seps):
+            out.append(row_seps[i])
+
+    newtbl = ''.join(out)
+
+    if updated:
+        text = text[:a] + newtbl + text[b:]
+        break
+
+print(text)
+PY
+)
+
+if [ "x$OLD_TEXT" = "x$new_text" ]; then
+  echo "==> No change (row not found or content already up to date)."
+  exit 0
+fi
+
+if [ "${DRY_RUN:-true}" = "true" ]; then
+  echo "==> DRY RUN — skipping save."
+  exit 0
+fi
+
+echo "==> 7) Save edit"
+startts=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+ASSERT_OPT="--data-urlencode assert=${ASSERT_LEVEL}"
+
+_curl -s -X POST "$WIKI_API" \
+  --data-urlencode action=edit \
+  --data-urlencode format=json \
+  --data-urlencode "title=${PAGE_TITLE}" \
+  --data-urlencode "text=${new_text}" \
+  --data-urlencode "summary=Automated: update col ${TARGET_COL} for '${KEY_VALUE}'" \
+  $ASSERT_OPT \
+  --data-urlencode "basetimestamp=${basets}" \
+  --data-urlencode "starttimestamp=${startts}" \
+  --data-urlencode "token=${csrf_token}" \
+| python3 -c 'import sys,json; print(json.dumps(json.load(sys.stdin), indent=2))'
+'''
+          }
+        }
+      }
+    }
+  }
+
+  post {
+    always {
+      echo 'Done. If nothing changed, review diagnostics for header match and sample keys.'
+    }
+  }
+}
