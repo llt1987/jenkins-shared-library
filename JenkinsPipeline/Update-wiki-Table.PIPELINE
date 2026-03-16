@@ -10,11 +10,13 @@ pipeline {
     choice(name: 'KEY_COLUMN',   choices: ['1','2'], description: 'Column to match: 1 = Client Name, 2 = Stack Name')
     string(name: 'KEY_VALUE',    defaultValue: 'CIMB MY', description: 'Display text in the chosen column to identify the row')
     string(name: 'NEW_VERSION',  defaultValue: '[[NOVA7-00-01-164]]', description: 'Wikitext to put in column 3 (Nova Version)')
-    // Default header matches:  ! Client Name !! Stack Name !! Nova Version
-    // If your header cells are styled (e.g., ! style="..." | Client Name), either leave blank to scan all tables
+
+    // Header selector:
+    // If header cells are styled (e.g., ! style="..." | Client Name) either leave blank to scan all tables,
     // or use this tolerant pattern:
     // (?is)!\\s*(?:[^\\n|]*\\|\\s*)?Client\\s*Name.*?!!\\s*(?:[^\\n|]*\\|\\s*)?Stack\\s*Name.*?!!\\s*(?:[^\\n|]*\\|\\s*)?Nova\\s*Version
     string(name: 'HEADER_REGEX', defaultValue: '(?i)!\\s*Client\\s*Name\\s*!!\\s*Stack\\s*Name\\s*!!\\s*Nova\\s*Version', description: 'Regex to select the table header (leave empty to scan all tables)')
+
     booleanParam(name: 'DRY_RUN', defaultValue: true, description: 'If true, do not save (diagnostics only)')
     booleanParam(name: 'DIAG',    defaultValue: true, description: 'Print sample keys from the match column (stderr)')
   }
@@ -179,7 +181,7 @@ def split_attr_prefix(cell: str):
 
 def display(cell_content: str) -> str:
     """Human-visible text: drop ''bold/italics''; [[Page|Text]] → Text."""
-    s = re.sub("''+", "", cell_content).strip()
+    s = re.sub(r"''+", "", cell_content).strip()
     if s.startswith('[[') and s.endswith(']]'):
         inner = s[2:-2]
         if '|' in inner:
@@ -191,7 +193,7 @@ def normalize_cells(block: str) -> str:
     """
     1) For any line-leading '|' (after optional spaces), insert one uniform cell break.
     2) Normalize inline '||' (with/without spaces) to ' || '.
-    3) Remove any leading '||' at the start of the block (prevents empty first token).
+    3) Remove any leading '||' at the start of the block (prevents an empty first token).
     """
     lines = []
     for ln in block.splitlines():
@@ -272,6 +274,7 @@ for a, b in tables:
 
         if len(cells_prefixed) >= max(keycol, tgtcol):
             if display_for_match[keycol - 1] == keyval:
+                # Replace only content; leave any attribute prefix (e.g., rowspan="3"| ) intact
                 cells_prefixed[tgtcol - 1][1] = newval
                 updated = True
 
@@ -282,13 +285,13 @@ for a, b in tables:
         new_row = '| ' + ' || '.join(out_cells) + '\\n'
         rebuilt_rows.append(new_row)
 
-    # Interleave with original row separators
+    # ---- Interleave rows with their original "|-" separators, each on its own line ----
     out = []
     for i, row in enumerate(rebuilt_rows):
-        out.append(row)
+        out.append(row)                                 # row ends with \\n
         if i < len(row_seps):
-            out.append(row_seps[i])
-
+            sep = row_seps[i].rstrip('\\r\\n')
+            out.append(sep + '\\n')                     # force separator on its own line
     newtbl = ''.join(out)
 
     if updated:
