@@ -1,0 +1,177 @@
+pipeline {
+  agent { label "Agent1"}
+
+  environment {
+    // Prefer https://.../api.php if your site supports TLS
+    WIKI_API        = 'http://novawiki.novastp.com/wiki/novadoc/api.php'
+
+    PAGE_TITLE      = 'OCBC_NOVA4-00-03-70-Bonds'   // exact page title
+    SECTION_ID      = ''                             // e.g. '3' or '0' (lead); leave empty to resolve by heading
+    SECTION_HEADING = 'Jenkins Build Status'         // used if SECTION_ID is empty
+    MODE            = 'append'                       // 'append' or 'replace'
+    EDIT_SUMMARY    = 'Automated update from Jenkins'
+  }
+
+  stages {
+    stage('Update MediaWiki section') {
+      steps {
+        withCredentials([
+          usernamePassword(credentialsId: 'mediawiki-bot-creds',
+                           usernameVariable: 'WIKI_USER',
+                           passwordVariable: 'WIKI_PASS')
+        ]) {
+          sh '''
+            #!/bin/sh
+            set -eu
+
+            tmpdir="$(mktemp -d)"
+            cookiejar="$tmpdir/cookies.txt"
+
+            _curl() { curl -fSL --retry 2 --retry-delay 2 -b "$cookiejar" -c "$cookiejar" "$@"; }
+
+            echo "==> 1) Get login token"
+            login_token=$(_curl -sG "$WIKI_API" \
+              --data-urlencode action=query \
+              --data-urlencode meta=tokens \
+              --data-urlencode type=login \
+              --data-urlencode format=json \
+              | python3 -c 'import sys,json; print(json.load(sys.stdin)["query"]["tokens"]["logintoken"])')
+
+            echo "==> 2) Login (POST each field separately; NO & or &amp;)"
+            _curl -s -X POST "$WIKI_API" \
+              --data-urlencode action=login \
+              --data-urlencode format=json \
+              --data-urlencode "lgname=${WIKI_USER}" \
+              --data-urlencode "lgpassword=${WIKI_PASS}" \
+              --data-urlencode "lgtoken=${login_token}" >/dev/null
+
+            echo "==> 3) Verify session (meta=userinfo)"
+            who_json=$(_curl -sG "$WIKI_API" \
+              --data-urlencode action=query \
+              --data-urlencode meta=userinfo \
+              --data-urlencode uiprop=groups \
+              --data-urlencode format=json)
+            who=$(printf %s "$who_json" | python3 -c 'import sys,json; j=json.load(sys.stdin); print(j.get("query",{}).get("userinfo",{}).get("name",""))')
+
+            if [ -z "$who" ] || [ "$who" = "Anonymous" ] || [ "$who" = "Not logged in" ] || echo "$who" | grep -Eq '^[0-9]+\\.[0-9]+\\.[0-9]+\\.[0-9]+$'; then
+              echo "!! Not logged in; retrying login once ..."
+              _curl -s -X POST "$WIKI_API" \
+                --data-urlencode action=login \
+                --data-urlencode format=json \
+                --data-urlencode "lgname=${WIKI_USER}" \
+                --data-urlencode "lgpassword=${WIKI_PASS}" \
+                --data-urlencode "lgtoken=${login_token}" >/dev/null
+
+              who_json=$(_curl -sG "$WIKI_API" \
+                --data-urlencode action=query \
+                --data-urlencode meta=userinfo \
+                --data-urlencode uiprop=groups \
+                --data-urlencode format=json)
+              who=$(printf %s "$who_json" | python3 -c 'import sys,json; j=json.load(sys.stdin); print(j.get("query",{}).get("userinfo",{}).get("name",""))')
+            fi
+
+            echo "==> Logged in as: ${who:-<unknown>}"
+            if [ -z "$who" ] || [ "$who" = "Anonymous" ] || [ "$who" = "Not logged in" ] || echo "$who" | grep -Eq '^[0-9]+\\.[0-9]+\\.[0-9]+\\.[0-9]+$'; then
+              echo "ERROR: Still not logged in; check HTTPS endpoint and credentials." >&2
+              exit 2
+            fi
+
+            echo "==> 4) Get CSRF token"
+            csrf_token=$(_curl -sG "$WIKI_API" \
+              --data-urlencode action=query \
+              --data-urlencode meta=tokens \
+              --data-urlencode format=json \
+              | python3 -c 'import sys,json; print(json.load(sys.stdin)["query"]["tokens"]["csrftoken"])')
+
+            # ---------- Resolve target section ----------
+            target_section="${SECTION_ID:-}"
+
+            if [ -z "$target_section" ] && [ -n "${SECTION_HEADING:-}" ]; then
+              echo "==> Resolving section index by heading: ${SECTION_HEADING}"
+              sec_json=$(_curl -sG "$WIKI_API" \
+                --data-urlencode action=parse \
+                --data-urlencode "page=${PAGE_TITLE}" \
+                --data-urlencode prop=sections \
+                --data-urlencode format=json)
+              target_section=$(SEC_JSON="$sec_json" SEC_HEADING="${SECTION_HEADING}" \
+                python3 -c 'import os,json
+sec=json.loads(os.environ["SEC_JSON"]) if os.environ.get("SEC_JSON") else {}
+want=os.environ.get("SEC_HEADING","")
+print(next((s.get("index","") for s in sec.get("parse",{}).get("sections",[]) if s.get("line")==want), ""))' || true)
+              [ -z "$target_section" ] && target_section="new"
+            fi
+
+            echo "==> Target section: ${target_section:-<unset>}"
+
+            # ---------- Compose the text ----------
+            new_line="* Build ${BUILD_NUMBER} — ${BUILD_STATUS:-SUCCESS} on job '${JOB_NAME}' at $(date -u +'%Y-%m-%d %H:%M:%SZ')"
+
+            if [ "${MODE}" = "append" ] && [ "${target_section}" != "new" ]; then
+              current=$(_curl -sG "$WIKI_API" \
+                --data-urlencode action=parse \
+                --data-urlencode "page=${PAGE_TITLE}" \
+                --data-urlencode prop=wikitext \
+                --data-urlencode "section=${target_section}" \
+                --data-urlencode format=json \
+                | python3 -c 'import sys,json; print(json.load(sys.stdin).get("parse",{}).get("wikitext",{}).get("*",""))')
+              case "$current" in
+                *$(printf '\\n')) new_text="${current}${new_line}" ;;
+                '')               new_text="${new_line}" ;;
+                *)                new_text="${current}\n${new_line}" ;;
+              esac
+            else
+              new_text="${new_line}"
+            fi
+
+            echo "==> 5) Timestamps to avoid edit conflicts"
+            rev_json=$(_curl -sG "$WIKI_API" \
+              --data-urlencode action=query \
+              --data-urlencode prop=revisions \
+              --data-urlencode "titles=${PAGE_TITLE}" \
+              --data-urlencode rvprop=timestamp \
+              --data-urlencode format=json)
+            basets=$(printf %s "$rev_json" | python3 -c 'import sys,json
+j=json.load(sys.stdin); p=list(j["query"]["pages"].values())[0]; r=p.get("revisions",[{}])[0]; print(r.get("timestamp",""))')
+            startts=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+
+            # Assertions/flags: keep assert=user; only use bot=true if your account has the 'bot' right
+            ASSERT_OPT="--data-urlencode assert=user"
+            BOT_OPT=""  # set to BOT_OPT="--data-urlencode bot=true" only if you have bot rights
+
+            echo "==> 6) Edit (POST-only)"
+            if [ "${target_section}" = "new" ]; then
+              _curl -s -X POST "$WIKI_API" \
+                --data-urlencode action=edit \
+                --data-urlencode format=json \
+                --data-urlencode "title=${PAGE_TITLE}" \
+                --data-urlencode section=new \
+                --data-urlencode "sectiontitle=${SECTION_HEADING:-Automated Update}" \
+                --data-urlencode "text=${new_text}" \
+                --data-urlencode "summary=${EDIT_SUMMARY}" \
+                $ASSERT_OPT $BOT_OPT \
+                --data-urlencode "basetimestamp=${basets}" \
+                --data-urlencode "starttimestamp=${startts}" \
+                --data-urlencode "token=${csrf_token}" \
+                | python3 -c 'import sys,json; print(json.dumps(json.load(sys.stdin), indent=2))'
+            else
+              _curl -s -X POST "$WIKI_API" \
+                --data-urlencode action=edit \
+                --data-urlencode format=json \
+                --data-urlencode "title=${PAGE_TITLE}" \
+                --data-urlencode "section=${target_section}" \
+                --data-urlencode "text=${new_text}" \
+                --data-urlencode "summary=${EDIT_SUMMARY} (section ${target_section})" \
+                $ASSERT_OPT $BOT_OPT \
+                --data-urlencode "basetimestamp=${basets}" \
+                --data-urlencode "starttimestamp=${startts}" \
+                --data-urlencode "token=${csrf_token}" \
+                | python3 -c 'import sys,json; print(json.dumps(json.load(sys.stdin), indent=2))'
+            fi
+
+            rm -rf "$tmpdir"
+          '''
+        }
+      }
+    }
+  }
+}
