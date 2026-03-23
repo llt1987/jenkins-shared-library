@@ -58,4 +58,9 @@ def validateSIT() {
     }
 }
 
+def cleanup() {
+    echo 'Cleaning workspace'
+    cleanWs()
+}
+
 return this
