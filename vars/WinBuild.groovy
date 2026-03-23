@@ -45,14 +45,14 @@ def validate() {
 
 def validateSIT() {
 
-    stage('Validate') {
+    stage('ValidateSIT') {
         script {
             FAILED_STAGE = env.STAGE_NAME
 
 
                 def buildType = env.BUILDTYPE?.toUpperCase()
 
-                echo "✅ ${buildType} build successful for ${TAG}"
+                echo "✅ ${buildType} build successful for NOVA"
             
         }
     }
