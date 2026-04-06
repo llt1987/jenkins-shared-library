@@ -1,8 +1,6 @@
-def call(Map config = [:], Closure body) {
+def call(Closure body) {
     pipeline {
-
-        /* ✅ Agent is configurable, NOT frozen */
-        agent config.agent ?: none
+        agent none   // ✅ not frozen globally
 
         options {
             skipDefaultCheckout()
@@ -17,7 +15,6 @@ def call(Map config = [:], Closure body) {
         }
 
         stages {
-            body.delegate = this
             body()
         }
     }
