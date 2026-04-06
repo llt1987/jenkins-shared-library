@@ -1,4 +1,4 @@
-package org.utils
+package utils
 
 class genericFunctions implements Serializable {
 
