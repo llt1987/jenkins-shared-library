@@ -1,6 +1,6 @@
 def call(Closure body) {
     pipeline {
-        agent none   // ✅ not frozen globally
+        agent none
 
         options {
             skipDefaultCheckout()
@@ -15,7 +15,13 @@ def call(Closure body) {
         }
 
         stages {
-            body()
+            stage('Pipeline') {
+                steps {
+                    script {
+                        body()
+                    }
+                }
+            }
         }
     }
 }
