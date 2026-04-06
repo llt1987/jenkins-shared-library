@@ -1,5 +1,8 @@
-import org.company.utils.genericFunctions
-
-def call(Map config = [:]) {
-    genericFunctions.commonPipelineOptions(config)
+def buildRetention(Map config = [:]) {
+    buildDiscarder(
+        logRotator(
+            numToKeepStr: config.numToKeep ?: '5',
+            daysToKeepStr: config.daysToKeep ?: '5'
+        )
+    )
 }
