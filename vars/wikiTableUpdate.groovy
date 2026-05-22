@@ -1,31 +1,29 @@
 // vars/wikiTableUpdate.groovy
 //
-// Update a single cell in a MediaWiki table by row key and column number,
-// and print diagnostic "sample keys" from the target column (Patch 2).
+// Update a single cell in a MediaWiki table by row key and column number.
+// Ships with diagnostics (Patch 2): prints a few "sample keys" from the match column
+// so you can confirm the right table and row are being targeted.
 //
-// Typical use: update column 3 ("Nova Version") for the row whose
-// "Client Name" (col 1) is "CIMB MY".
-//
-// Example (from a Jenkinsfile):
+// Example usage (Jenkinsfile):
 //
 //   @Library('mw-lib') _
 //   pipeline {
 //     agent any
 //     stages {
-//       stage('Update Nova Version (col 3) for CIMB MY') {
+//       stage('Update Nova Version for CIMB MY') {
 //         steps {
 //           wikiTableUpdate(
 //             wikiApi:       'https://novawiki.novastp.com/wiki/novadoc/api.php',
 //             pageTitle:     'YourPageTitleHere',
-//             keyColumn:     1,                      // match on column 1 (Client Name)
-//             keyValue:      'CIMB MY',              // row key to match
-//             targetColumn:  3,                      // update the 3rd column
-//             newValue:      '[[NOVA7-00-01-164]]',  // wikitext to write
+//             keyColumn:     1,                      // match on column 1 ("Client Name")
+//             keyValue:      'CIMB MY',              // the row key to match
+//             targetColumn:  3,                      // update "Nova Version" (column 3)
+//             newValue:      '[[NOVA7-00-01-164]]',  // wikitext or plain text
 //             credentialsId: 'mediawiki-bot-creds',  // Username: RealUser@BotName ; Password: Bot Password
 //             assertLevel:   'user',
 //             markBot:       false,
-//             dryRun:        false,
-//             diag:          true                    // Patch 2 diagnostics (default true)
+//             dryRun:        false,                  // try true first if you want a dry run
+//             diag:          true                    // print sample keys (Patch 2)
 //           )
 //         }
 //       }
@@ -43,9 +41,10 @@ def call(Map cfg = [:]) {
   int    targetColumn = (cfg.containsKey('targetColumn') ? cfg.targetColumn : 3) as int
   String newValue     = (cfg.newValue ?: '').trim()   // e.g., "[[NOVA7-00-01-164]]"
 
-  // Optional table selector (used if the page has multiple tables)
-  // Default tries to match:  ! Client Name !! Stack Name !! Nova Version
-  String headerRegex  = (cfg.headerRegex ?: '(?i)\\!\\s*Client\\s*Name\\s*\\!\\!\\s*Stack\\s*Name\\s*\\!\\!\\s*Nova\\s*Version').trim()
+  // Optional: identify the intended table by header row.
+  // SAFER default (no '\!' escapes which Python re dislikes):
+  // Matches:  ! Client Name !! Stack Name !! Nova Version  (case-insensitive)
+  String headerRegex  = (cfg.headerRegex ?: '(?i)!\\s*Client\\s*Name\\s*!!\\s*Stack\\s*Name\\s*!!\\s*Nova\\s*Version').trim()
 
   // -------- Auth / behavior --------
   String credentialsId = (cfg.credentialsId ?: 'mediawiki-bot-creds').trim()
@@ -74,13 +73,13 @@ def call(Map cfg = [:]) {
       "KEY_VALUE=${keyValue}",
       "TARGET_COL=${targetColumn}",
       "NEW_VALUE=${newValue}",
-      "HEADER_REGEX=${headerRegex}",   // always provided from Groovy
+      "HEADER_REGEX=${headerRegex}",   // provided from Groovy (no Python-side default)
       "ASSERT_LEVEL=${assertLevel}",
       "LGDOMAIN=${lgdomain}",
       "MARK_BOT=${markBot}",
       "DRY_RUN=${dryRun}",
       "EDIT_SUMMARY=${editSummary}",
-      "TABLE_DIAG=${diag}"             // Patch 2 diagnostics toggle
+      "TABLE_DIAG=${diag}"
     ]) {
       sh '''#!/bin/sh
 set -eu
@@ -215,17 +214,18 @@ def display(cell: str) -> str:
 
 updated = False
 
-# Precompiled pattern for row separators (no raw strings; double-escaped backslashes)
-row_sep_pattern = '(?m)^[|]-\\s.*\\n?
+# ---- Row separator pattern (no raw strings; no backslash before '|') ----
+# Using a character class [|] and double-escaped \\s, \\n to avoid Python string warnings.
+row_sep_re = re.compile('(?m)^[|]-\\s.*\\n?')
 
 for a, b in tables:
     tbl = text[a:b]
     header_ok = (not hdrx) or bool(re.search(hdrx, tbl))
 
-    # ---- Patch 2: diagnostics (print sample keys from the match column) ----
+    # ---- Diagnostics: print sample keys from the match column (max 5) ----
     if diag:
         sample_keys = []
-        for ch in re.split(row_sep_pattern, tbl):
+        for ch in row_sep_re.split(tbl):
             body = ch.replace('\\r\\n|', ' || ').replace('\\n|', ' || ').strip()
             if not body or body.startswith('!'):
                 continue
@@ -241,9 +241,9 @@ for a, b in tables:
     if not header_ok:
         continue
 
-    # ---- Split rows on lines that start with "|-" (keep separators separately) ----
-    row_seps   = re.findall(row_sep_pattern, tbl)
-    row_chunks = re.split  (row_sep_pattern, tbl)
+    # ---- Split rows (keep separators separately) ----
+    row_seps   = row_sep_re.findall(tbl)
+    row_chunks = row_sep_re.split  (tbl)
 
     rebuilt_rows = []
 
@@ -276,7 +276,7 @@ for a, b in tables:
         new_row = '| ' + ' || '.join(cells) + '\\n'
         rebuilt_rows.append(new_row)
 
-    # ---- Re‑interleave with their "|-" separators ----
+    # ---- Re‑interleave with "|-" separators ----
     out = []
     for i, row in enumerate(rebuilt_rows):
         out.append(row)

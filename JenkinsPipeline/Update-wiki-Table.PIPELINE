@@ -9,7 +9,8 @@ pipeline {
     string(name: 'PAGE_TITLE',   defaultValue: 'TestNtier', description: 'Wiki page to update')
     choice(name: 'KEY_COLUMN',   choices: ['1','2'], description: 'Column to match: 1 = Client Name, 2 = Stack Name')
     string(name: 'KEY_VALUE',    defaultValue: 'CIMB MY', description: 'Display text in the chosen column to identify the row')
-    string(name: 'NEW_VERSION',  defaultValue: '[[NOVA7-00-01-164]]', description: 'Wikitext to put in column 3 (Nova Version)')
+    // When you want to change only the display in [[Target|Display]], set NEW_VERSION to the new display string
+    string(name: 'NEW_VERSION',  defaultValue: 'NOVA7-00-01-164', description: 'New display string for 3rd-column link (e.g., NOVA7-00-01-164)')
 
     // Header selector:
     // If header cells are styled (e.g., ! style="..." | Client Name) either leave blank to scan all tables,
@@ -35,15 +36,14 @@ pipeline {
             "KEY_COL=${params.KEY_COLUMN}",
             "KEY_VALUE=${params.KEY_VALUE}",
             "TARGET_COL=3",
-            "NEW_VALUE=${params.NEW_VERSION}",
+            "NEW_VALUE=${params.NEW_VERSION}",      // display text for col-3
             "HEADER_REGEX=${params.HEADER_REGEX}",
             "DRY_RUN=${params.DRY_RUN}",
             "DIAG=${params.DIAG}",
             "ASSERT_LEVEL=user",   // change to 'bot' only if your account has the bot right
             "LGDOMAIN="            // set only if your wiki requires a domain at login (e.g., LDAP/AD)
           ]) {
-
-            sh '''#!/bin/sh
+            sh '''
 set -eu
 
 need() { command -v "$1" >/dev/null 2>&1 || { echo "Missing: $1" >&2; exit 2; }; }
@@ -51,6 +51,7 @@ need curl; need python3
 
 tmpdir="$(mktemp -d)"
 cookiejar="$tmpdir/cookies.txt"
+pyfile="$tmpdir/update_wiki_table.py"
 cleanup() { rm -rf "$tmpdir"; }
 trap cleanup EXIT
 
@@ -109,12 +110,10 @@ page_json=$(_curl -sG "$WIKI_API" \
 )
 
 [ -z "${page_json:-}" ] && { echo "ERROR: Empty response for '${PAGE_TITLE}'" >&2; exit 2; }
-export PAGE_JSON="$page_json" KEY_COL TARGET_COL KEY_VALUE NEW_VALUE HEADER_REGEX DIAG
 
-old_text=$(
-  python3 - <<'PY'
-import os, json
-d=json.loads(os.environ['PAGE_JSON'])
+old_text=$(printf %s "$page_json" | python3 - <<'PY'
+import sys, json
+d=json.load(sys.stdin)
 try:
     rev=d["query"]["pages"][0]["revisions"][0]
     print(rev.get("slots",{}).get("main",{}).get("content",""))
@@ -123,33 +122,26 @@ except Exception:
 PY
 )
 
-basets=$(
-  python3 - <<'PY'
-import os, json
-d=json.loads(os.environ['PAGE_JSON'])
+basets=$(printf %s "$page_json" | python3 - <<'PY'
+import sys, json
+d=json.load(sys.stdin)
 try:
     print(d["query"]["pages"][0]["revisions"][0].get("timestamp",""))
 except Exception:
     print("", end="")
 PY
 )
+[ -z "${basets:-}" ] && { echo "ERROR: No basetimestamp found for '${PAGE_TITLE}'." >&2; exit 2; }
 
-if [ -z "${basets:-}" ]; then
-  echo "ERROR: No basetimestamp found for '${PAGE_TITLE}'." >&2
-  exit 2
-fi
-
-echo "==> 6) Update table (column ${TARGET_COL}) for key '${KEY_VALUE}'"
-export OLD_TEXT="$old_text"
-new_text=$(
-  python3 - <<'PY'
+echo "==> 6) Prepare Python updater"
+cat > "$pyfile" <<'PY'
 import os, re, sys
 
 text   = os.environ.get('OLD_TEXT','')
 keycol = int(os.environ.get('KEY_COL','1'))
 tgtcol = int(os.environ.get('TARGET_COL','3'))
 keyval = os.environ.get('KEY_VALUE','').strip()
-newval = os.environ.get('NEW_VALUE','').strip()
+newdisp= os.environ.get('NEW_VALUE','').strip()   # new display text for the link
 hdrx   = os.environ.get('HEADER_REGEX','').strip()
 diag   = os.environ.get('DIAG','true').lower() in ('1','true','yes')
 
@@ -181,13 +173,56 @@ def split_attr_prefix(cell: str):
 
 def display(cell_content: str) -> str:
     """Human-visible text: drop ''bold/italics''; [[Page|Text]] → Text."""
-    s = re.sub("''+", "", cell_content).strip()
+    s = re.sub(r"''+", "", cell_content).strip()
     if s.startswith('[[') and s.endswith(']]'):
         inner = s[2:-2]
         if '|' in inner:
             return inner.split('|', 1)[1].strip()
         return inner.strip()
     return s
+
+def set_link_display_only(content: str, new_disp: str) -> str:
+    """
+    Replace only the display text of a wiki link:
+      - [[Page|Old]] -> [[Page|new_disp]]
+      - [[Page]]     -> [[Page|new_disp]]
+      - preserve bold wrappers if present
+      - if no link, replace first NOVA*-style token with new_disp
+    """
+    BOLD = "'" * 3
+    bold_l = content.startswith(BOLD)
+    bold_r = content.endswith(BOLD)
+    inner  = content[len(BOLD):-len(BOLD)].strip() if (bold_l and bold_r) else content
+
+# build regex without raw strings or backslash escapes
+link_with_display = '^\\s*\\[\\[([^\\]|]+)\\|([^\\]]*)\\]\\]\\s*$'
+link_without_display = '^\\s*\\[\\[([^\\]]+)\\]\\]\\s*$'
+
+m = re.match(link_with_display, inner)
+if m:
+    page = m.group(1).strip()
+    new_inner = '[[' + page + '|' + new_disp + ']]'
+    return BOLD + new_inner + BOLD if (bold_l and bold_r) else new_inner
+
+m = re.match(link_without_display, inner)
+if m:
+    page = m.group(1).strip()
+    new_inner = '[[' + page + '|' + new_disp + ']]'
+    return BOLD + new_inner + BOLD if (bold_l and bold_r) else new_inner
+    if m:
+        page = m.group(1).strip()
+        new_inner = f'[[{page}|{new_disp}]]'
+        return f"{BOLD}{new_inner}{BOLD}" if (bold_l and bold_r) else new_inner
+
+    m = re.match(r'^\s*\[\[([^\]]+)\]\]\s*$', inner)
+    if m:
+        page = m.group(1).strip()
+        new_inner = f'[[{page}|{new_disp}]]'
+        return f"{BOLD}{new_inner}{BOLD}" if (bold_l and bold_r) else new_inner
+
+    # no link: replace a NOVA*-style token (first match) only
+    repl = re.sub(r'(NOVA[0-9]+-[0-9]+-[0-9]+-[0-9]+)', new_disp, inner, count=1)
+    return f"{BOLD}{repl}{BOLD}" if (bold_l and bold_r) else repl
 
 def normalize_cells(block: str) -> str:
     """
@@ -197,14 +232,14 @@ def normalize_cells(block: str) -> str:
     """
     lines = []
     for ln in block.splitlines():
-        raw = ln.lstrip(' \\t')
+        raw = ln.lstrip(' \t')
         if raw.startswith('|') and not raw.startswith('|+'):  # not a caption
             idx = ln.find('|')
             ln  = ln[:idx] + ' || ' + ln[idx+1:]
         lines.append(ln)
-    body = '\\n'.join(lines)
+    body = '\n'.join(lines)
     body = body.replace('||', ' || ')
-    body = re.sub(r'^(?:\\s*\\|\\|\\s*)+', '', body)  # drop leading delimiters
+    body = re.sub(r'^(?:\s*\|\|\s*)+', '', body)  # drop leading delimiters
     return body.strip()
 
 def peel_trailing_end(block: str):
@@ -218,14 +253,14 @@ def peel_trailing_end(block: str):
     while k >= 0 and lines[k].strip() == '':
         trail = lines[k] + trail
         k -= 1
-    if k >= 0 and re.match('^\\s*\\|\\s*}\\s*$', lines[k]):
+    if k >= 0 and re.match(r'^\s*\|\s*}\s*$', lines[k]):
         end_line = lines[k] + trail
         content  = ''.join(lines[:k])
         return content, end_line
     return block, ''  # no closing line
 
 # ---- Robust row delimiter (optional leading spaces, optional attributes) ----
-row_sep_re = re.compile('(?m)^[ \\t]*\\|\\-[^\\n]*$')
+row_sep_re = re.compile(r'(?m)^[ \t]*\|-[^\n]*$')
 
 updated = False
 
@@ -237,7 +272,6 @@ for a, b in tables:
     if diag:
         sample = []
         for ch in row_sep_re.split(tbl):
-            # drop any closing line from the chunk before normalization
             content_only, _ = peel_trailing_end(ch)
             if any(line.lstrip().startswith('|+') for line in content_only.splitlines()):  # skip captions
                 continue
@@ -286,7 +320,7 @@ for a, b in tables:
 
         cells_raw = [c.strip() for c in body.split(' || ') if c.strip()]  # drop empties
 
-        # Preserve attributes; only content may change
+        # Preserve attributes; only content may change (and only the link display)
         cells_prefixed = []
         display_for_match = []
         for c in cells_raw:
@@ -296,24 +330,25 @@ for a, b in tables:
 
         if len(cells_prefixed) >= max(keycol, tgtcol):
             if display_for_match[keycol - 1] == keyval:
-                # Replace only content; leave any attribute prefix intact
-                cells_prefixed[tgtcol - 1][1] = newval
+                # Replace only the DISPLAY text of the wiki link in column 3 (or the NOVA token)
+                old_content = cells_prefixed[tgtcol - 1][1]
+                cells_prefixed[tgtcol - 1][1] = set_link_display_only(old_content, newdisp)
                 updated = True
 
         # Rebuild row with original prefixes + (maybe) updated content
         out_cells = []
         for pref, cont in cells_prefixed:
             out_cells.append((pref or '') + cont)
-        new_row = '| ' + ' || '.join(out_cells) + '\\n'
+        new_row = '| ' + ' || '.join(out_cells) + '\n'
         rebuilt_rows.append(new_row + end_line)   # append original closing line (if any)
 
     # ---- Interleave rows with their original "|-" separators, each on its own line ----
     out = []
     for i, row in enumerate(rebuilt_rows):
-        out.append(row)                                 # row ends with \\n (or includes end_line)
+        out.append(row)                                 # row ends with \n (or includes end_line)
         if i < len(row_seps):
-            sep = row_seps[i].rstrip('\\r\\n')
-            out.append(sep + '\\n')                     # ensure '|-' is on its own line
+            sep = row_seps[i].rstrip('\r\n')
+            out.append(sep + '\n')                      # ensure '|-' is on its own line
     newtbl = ''.join(out)
 
     if updated:
@@ -322,7 +357,11 @@ for a, b in tables:
 
 print(text)
 PY
-)
+
+echo "==> 6a) Run Python updater (diagnostic mode: ${DIAG})"
+export OLD_TEXT="$old_text"
+python3 "$pyfile" > "$tmpdir/new_text.txt"
+new_text=$(cat "$tmpdir/new_text.txt")
 
 if [ "x$OLD_TEXT" = "x$new_text" ]; then
   echo "==> No change (row not found or content already up to date)."
