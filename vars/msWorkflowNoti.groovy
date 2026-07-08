@@ -6,7 +6,6 @@ def call(Map config = [:]) {
     String remarks     = config.remarks ?: "N/A"
     String failedStage = config.failedStage ?: ""
     String branch      = config.branch ?: (env.BRANCH_NAME ?: "N/A")
-
     String webhook = config.webhook ?: "https://default3f9410505131451c8ad67135423e60.94.environment.api.powerplatform.com:443/powerautomate/automations/direct/cu/10/workflows/90f2407e645848f0a08b6fba1e94871a/triggers/manual/paths/invoke?api-version=1&sp=%2Ftriggers%2Fmanual%2Frun&sv=1.0&sig=9yqvlbr5gxt_PhbwMJ0qhzEJdAH8Mf386cTplfQ54RQ"
 
     String statusIcon = "ℹ️"
@@ -23,6 +22,33 @@ def call(Map config = [:]) {
             break
     }
 
+    //
+    // Collect developers / committers from SCM changes
+    //
+    def developers = []
+    def committers = []
+
+    try {
+        currentBuild.changeSets.each { changeSet ->
+            changeSet.items.each { item ->
+
+                if (item.author) {
+                    developers << item.author.toString()
+                    committers << item.author.toString()
+                }
+
+                if (item.commitId) {
+                    echo "Commit: ${item.commitId}"
+                }
+            }
+        }
+    } catch (Exception ex) {
+        echo "Unable to read changelog information: ${ex}"
+    }
+
+    developers = developers.unique().sort()
+    committers = committers.unique().sort()
+
     def facts = [
         [
             title: "Status",
@@ -34,6 +60,23 @@ def call(Map config = [:]) {
         ]
     ]
 
+    if (committers) {
+        facts << [
+            title: "Committers",
+            value: committers.join(", ")
+        ]
+    }
+
+    if (developers) {
+        facts << [
+            title: "Developers",
+            value: developers.join(", ")
+        ]
+    }
+
+    //
+    // Show Result only for FAILURE / UNSTABLE
+    //
     if (status.toUpperCase() in ["FAILURE", "UNSTABLE"] &&
         failedStage?.trim()) {
 
@@ -63,7 +106,9 @@ def call(Map config = [:]) {
                 text  : "Notification from ${env.JOB_NAME}: ${status}",
                 weight: "Bolder",
                 size  : "Medium",
-                color : status == "FAILURE" ? "Attention" : "Good"
+                color : status.toUpperCase() == "FAILURE" ? "Attention" :
+                        status.toUpperCase() == "SUCCESS" ? "Good" :
+                        "Warning"
             ],
             [
                 type  : "TextBlock",
@@ -84,6 +129,8 @@ def call(Map config = [:]) {
             ]
         ]
     ]
+
+    echo "Sending Teams Notification"
 
     httpRequest(
         httpMode: 'POST',
