@@ -1,0 +1,239 @@
+@Library("posttrade-shared-library") _
+
+def FAILED_STAGE = ''
+properties([
+    parameters([
+
+        // Project Group Parameter
+        [$class: 'ExtendedChoiceParameterDefinition',
+         name: 'PROJECT_GROUP',
+         type: 'PT_SINGLE_SELECT',
+         description: 'Select Project Group',
+         value: 'ASB,CGL,CMC,L&T,SCA_NOVA_RELEASE_ARTIFACT'
+        ],
+
+        // Components Parameter
+        [$class: 'ExtendedChoiceParameterDefinition',
+         name: 'CONTAINER',
+         type: 'PT_SINGLE_SELECT',
+         description: 'Select component to scan',
+         value: 'novaserver,novagui,rpc'
+        ],
+
+        // TAG Parameter
+        [$class: 'CascadeChoiceParameter',
+         choiceType: 'PT_SINGLE_SELECT',
+         name: 'TAG',
+         description: 'Select a TAG based on Components',
+         referencedParameters: 'PROJECT_GROUP,CONTAINER',
+         filterable: true,
+         filterLength: 1,
+         script: [
+             $class: 'GroovyScript',
+             fallbackScript: [classpath: [], sandbox: false, script: 'return ["Error loading tags"]'],
+             script: [classpath: [], sandbox: false, script: '''
+import jenkins.model.*
+
+credentialsId = 'svc.jenkin.agent.novacmx'
+
+def regexMap = [
+    "ASB" : "*NOVA7-00-*-ASB-*",
+    "CGL" : "*NOVA7-00-*-CAN-*",
+    "CMC" : "*NOVA7-00-*-CMC-*",
+    "L&T" : "*NOVA6-00-*-LNT-*",
+    "SCA_NOVA_RELEASE_ARTIFACT" : "*NOVA7-00-*"
+]
+
+def regexPattern = regexMap.get(PROJECT_GROUP, "*NOVA7-00-*")
+
+def creds = com.cloudbees.plugins.credentials.CredentialsProvider.lookupCredentials(
+    com.cloudbees.plugins.credentials.common.StandardUsernameCredentials.class,
+    Jenkins.instance,
+    null,
+    null
+).find {
+    it.id == credentialsId
+}
+
+def fetchTags(String repo, String username, String password, String regexPattern) {
+    def cmd = "git ls-remote --refs https://${username}:${password}@${repo}.git --tags ${regexPattern}"
+    def proc = cmd.execute()
+    proc.waitFor()
+
+    return proc.in.text.readLines()
+        .collect {
+            it.split()[1]
+              .replace('refs/tags/', '')
+              .replace('refs/heads/', '')
+        }
+}
+
+def repoMap = [
+    novaserver: "git.novacmx.com/nova/novantierserver",
+    novagui  : "git.novacmx.com/nova/novantiergui",
+    rpc    : "git.novacmx.com/nova/nova"
+]
+
+def selectedComponents = [CONTAINER]
+
+def intersection = null
+
+selectedComponents.each { comp ->
+    if (repoMap.containsKey(comp)) {
+        def repo = repoMap[comp]
+        def tags = fetchTags(
+            repo,
+            creds.username,
+            creds.password.getPlainText(),
+            regexPattern
+        ) as Set
+
+        if (intersection == null) {
+            intersection = tags
+        } else {
+            intersection = intersection.intersect(tags)
+        }
+    }
+}
+
+def uniqueTags = (intersection ?: []) as List
+uniqueTags = uniqueTags.sort()
+
+return uniqueTags
+             ''']
+         ]
+        ]
+    ])
+])
+
+
+pipeline {
+    agent {
+        label 'sg-prisca-01.novacmx.local'
+    }
+
+    options {
+        skipDefaultCheckout ()
+        disableConcurrentBuilds()
+        buildDiscarder(logRotator(numToKeepStr: '5'))
+        timestamps()
+    }
+
+    tools {
+        jdk 'jdk-25'
+    }
+
+    environment {
+        BLACKDUCK_URL = "https://blackduck-sca.hostednova.com"
+        DETECT_JAR = "/home/data_jenkins_agent/detect.jar"
+        BLACKDUCK_TOKEN = credentials('blackduck-api-token')
+        IMAGE_TAG = "${params.TAG}"
+    }
+
+    stages {
+
+        stage('Resolve Image') {
+            steps {
+                script {
+                    if (params.CONTAINER == 'novagui') {
+                        env.IMAGE_NAME = "novagui"
+                    } else if (params.CONTAINER == 'novaserver') {
+                        env.IMAGE_NAME = "novaserver"
+                    } else if (params.CONTAINER == 'rpc') {
+                        env.IMAGE_NAME = "novastp-19c-ol8"
+                    } else {
+                        error "Invalid input"
+                    }
+
+                    env.FULL_IMAGE = "harbor.novacmx.com/posttrade/${env.IMAGE_NAME}:${env.IMAGE_TAG}"
+                    env.TAR_FILE = "${env.IMAGE_NAME}.tar"
+
+                    echo "Image: ${env.FULL_IMAGE}"
+                    echo "Tar: ${env.TAR_FILE}"
+
+                    currentBuild.displayName = "${IMAGE_TAG}"
+                    currentBuild.description = """Image: ${env.TAR_FILE}.gz
+Tag: ${IMAGE_TAG}"""
+
+                }
+            }
+        }
+
+        stage('Pull Image') {
+            steps {
+                sh '''
+                docker login harbor.novacmx.com
+                echo "Pulling image: $FULL_IMAGE"
+                docker pull "$FULL_IMAGE"
+                '''
+            }
+        }
+
+        stage('Save Tar') {
+            steps {
+                sh '''
+                echo "Saving image to tar..."
+                docker save -o "$WORKSPACE/$TAR_FILE" "$FULL_IMAGE"
+
+                ls -l "$WORKSPACE"
+                '''
+            }
+        }
+
+        stage('Validate Tar') {
+            steps {
+                sh '''
+                if [ ! -f "$WORKSPACE/$TAR_FILE" ]; then
+                    echo "ERROR: TAR file not found!"
+                    exit 1
+                fi
+                '''
+            }
+        }
+
+        stage('Black Duck Scan') {
+            steps {
+				sh '''
+				echo "Starting Black Duck Scan..."
+
+				java -jar "$DETECT_JAR" \
+				--blackduck.url="$BLACKDUCK_URL" \
+				--blackduck.api.token="$BLACKDUCK_TOKEN" \
+				--detect.project.name="$IMAGE_NAME.tar.gz" \
+				--detect.project.version.name="latest" \
+				--detect.project.version.notes="$IMAGE_TAG" \
+				--detect.project.version.update=true \
+				--detect.project.group.name="$PROJECT_GROUP" \
+				--detect.tools=CONTAINER_SCAN \
+				--detect.container.scan.file.path="$WORKSPACE/$TAR_FILE" \
+				--detect.container.scan.type=INTELLIGENT \
+				--blackduck.trust.cert=true \
+				--detect.blackduck.signature.scanner.fail.on.accuracy=false \
+				--logging.level.detect=INFO
+				'''
+            }
+        }
+
+        stage('Cleanup') {
+            steps {
+                sh '''
+                echo "Cleaning up..."
+                docker rmi "$FULL_IMAGE" || true
+                rm -f "$WORKSPACE/$TAR_FILE" || true
+                '''
+            }
+        }
+    }
+
+    post {
+        success {
+            echo "✅ Scan completed successfully!"
+        }
+        failure {
+            echo "❌ Scan failed!"
+        }
+        always {
+            cleanWs()
+        }
+    }
+}
