@@ -1,0 +1,116 @@
+pipeline {
+    agent any
+
+    environment {
+        IMAGE_NAME = "oracle19c-client-admin:ol8"
+        DOCKERFILE_PATH = "/home/lalit/workspace/Dockerfile1"
+    }
+
+    stages {
+        stage('Keycloak 26.5.1') {
+    agent { label 'ubuntu' }
+    steps {
+        script {
+            sh "whoami"
+            sh "whoami && id && env | grep PATH"            
+            sh "/home/lalit/.rd/bin/docker images"
+            def javaVersion = sh(
+            script: "/home/lalit/.rd/bin/docker run --rm --entrypoint bash quay.io/keycloak/keycloak:26.5.1 -c 'java -version' 2>&1",
+            returnStdout: true
+            ).trim()
+            // Extract just the version number (e.g. 21.0.9)
+            def matcher = (javaVersion =~ /\"(\d+\.\d+\.\d+)\"/)
+            def cleanVersion = matcher ? matcher[0][1] : "unknown"
+            env.oldversion="${cleanVersion}"
+            echo "Old Java version: ${env.oldversion}"
+            echo "Java version inside Keycloak image:${cleanVersion}"
+        }
+    }
+}
+        stage('Keycloak Latest') {
+            agent { label 'ubuntu' }
+            steps {
+            script {
+            sh "/home/lalit/.rd/bin/docker images"
+            def javaVersion = sh(
+            script: "/home/lalit/.rd/bin/docker run --rm --entrypoint bash quay.io/keycloak/keycloak:latest -c 'java -version' 2>&1",
+            returnStdout: true
+            ).trim()
+            // Extract just the version number (e.g. 21.0.9)
+            def matcher = (javaVersion =~ /\"(\d+\.\d+\.\d+)\"/)
+            def cleanVersion = matcher ? matcher[0][1] : "unknown"
+            env.newversion="${cleanVersion}"
+            echo "New Java version: ${env.newversion}"
+            echo "Java version inside Latest Keycloak image:${cleanVersion}"
+        }
+    }
+}
+        stage('Compare Java') {
+            agent { label 'ubuntu' }
+            steps {
+            script {
+            def oldVer = env.oldversion
+            def newVer = env.newversion
+
+            echo "Java version in Keycloak 26.5.1: ${oldVer}"
+            echo "Java version in Keycloak latest: ${newVer}"
+
+            if (oldVer != newVer) {
+                echo "New Java version detected in latest Keycloak: ${newVer}"
+                currentBuild.description = "Upgrade Java from ${oldVer} to ${newVer}"
+                currentBuild.displayName = "Java ${newVer}"
+                env.NEW_VERSION = newVer
+            } else {
+                echo "No new Java version detected."
+                currentBuild.description = "Java version unchanged: ${newVer}"
+                currentBuild.displayName = "Java ${newVer}"
+            }
+        }
+    }
+}
+            stage('Update Dockerfile') {
+            agent { label 'ubuntu' }    
+            when {
+        expression { env.NEW_VERSION != null }
+            }
+            steps {
+            script {
+            sh "whoami"
+            sh "whoami && id && env | grep PATH"            
+            echo "Workspace: ${env.WORKSPACE}"
+            sh "ls -l ${env.WORKSPACE}"
+            sh "ls -l /home/lalit/workspace"
+            //sh "cp /home/lalit/workspace/Dockerfile1 ${env.WORKSPACE}"
+            //sh "ls -l ${env.WORKSPACE}"
+            def dockerfile = readFile("${DOCKERFILE_PATH}")
+
+            // Replace Keycloak version tag with NEW_VERSION
+            //def updated = dockerfile.replaceAll(/quay\.io\/keycloak\/keycloak:\d+\.\d+\.\d+/, "quay.io/keycloak/keycloak:${env.NEW_VERSION}")
+            def updated = dockerfile.replaceAll(/quay\.io\/keycloak\/keycloak:\d+\.\d+\.\d+/, "quay.io/keycloak/keycloak:latest")
+
+            writeFile file: "${DOCKERFILE_PATH}", text: updated
+            echo "Dockerfile updated to Keycloak ${env.NEW_VERSION} latest"
+        }
+    }
+}
+        stage('Rebuild Image') {
+            when {
+                expression { env.NEW_VERSION != null }
+            }
+            steps {
+                //sh "docker build -t ${IMAGE_NAME} ."
+                sh "echo ${IMAGE_NAME}"
+            }
+        }
+    }
+
+    post {
+        success {
+            echo "Pipeline completed successfully."
+        }
+        failure {
+            echo "Pipeline failed. Check logs."
+        }
+    }
+}
+
