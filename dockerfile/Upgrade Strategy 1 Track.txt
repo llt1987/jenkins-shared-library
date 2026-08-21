@@ -1,0 +1,75 @@
+Upgrade Strategy
+1. Track Oracle Instant Client Releases
+
+    Oracle publishes patched RPMs on their Instant Client download page.
+
+    Vulnerability fixes are delivered as new RPM versions (e.g., oracle-instantclient19.28-basic replacing 19.27).
+
+2. Rebuild Your Docker Image
+
+    Update your Dockerfile to reference the new RPM version:
+    
+    RUN dnf install -y oracle-instantclient19.28-basic \
+    oracle-instantclient19.28-sqlplus \
+    oracle-instantclient19.28-tools \
+    ...
+Rebuild:
+
+docker build -t oracle19c-client-admin:ol8 .
+
+
+. Automate Patch Detection
+
+    Use a CI/CD pipeline to:
+
+        Periodically check Oracle’s repo or download page.
+
+        Trigger a rebuild when a new RPM version is available.
+
+    Example: a Jenkins job that runs dnf list oracle-instantclient* and compares versions.
+
+
+4. Manual RPM Updates (OL9 case)
+
+Since OL9 doesn’t have a Yum repo:
+
+    Download updated RPMs from Oracle’s site.
+
+    Replace them in your Docker build context.
+
+    Rebuild the image with the new RPMs.
+
+5. Security Scanning
+
+    Run container scans (e.g., trivy, grype) to detect vulnerabilities in your image.
+
+    This ensures you catch CVEs even if Oracle hasn’t announced them yet.
+    
+    
+    
+    
+    
+    
+    ============================================How to run image ===========================================================
+Run the container:
+docker run -it oracle19c-client-admin:ol8 bash
+Verify installation:
+sqlplus -V
+
+Networking Configuration
+
+Place your tnsnames.ora and sqlnet.ora in:
+/usr/lib/oracle/19.27/client64/lib/network/admin/
+
+Or mount them at runtime:
+docker run -v /my/tns:/usr/lib/oracle/19.27/client64/lib/network/admin:ro oracle19c-client-admin:ol9
+
+
+
+docker build -f Podman -t podman:ol8 .
+
+docker run -d --name podman-agent -e JENKINS_URL=http://localhost:8080 -e JENKINS_AGENT_NAME=podman-agent -e JENKINS_SECRET=ed365261108ebafeb9d3688bde36552b1d25c7559dd8cd302cf54930e38a99df podman:ol8
+
+docker run -d --name podman-agent -p 2400:22 podman:ol8
+
+    

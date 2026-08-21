@@ -1,0 +1,28 @@
+FROM oraclelinux:8
+
+# Install OpenSSH server, Java 17, Podman, and Git
+RUN dnf install -y \
+    openssh-server \
+    java-17-openjdk \
+    podman \
+    git \
+    && dnf clean all
+
+# Generate SSH host keys
+RUN ssh-keygen -A
+
+# Create Jenkins user
+RUN useradd -m -d /home/jenkins -s /bin/bash jenkins \
+    && echo "jenkins:jenkins" | chpasswd
+
+# Configure SSH for Jenkins user
+RUN mkdir /home/jenkins/.ssh \
+    && chmod 700 /home/jenkins/.ssh \
+    && chown -R jenkins:jenkins /home/jenkins/.ssh
+
+# Expose SSH port
+EXPOSE 22
+
+# Start SSH service
+CMD ["/usr/sbin/sshd", "-D"]
+

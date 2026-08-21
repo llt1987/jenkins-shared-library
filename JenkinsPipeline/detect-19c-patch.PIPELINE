@@ -1,0 +1,96 @@
+pipeline {
+    agent any
+
+    environment {
+        IMAGE_NAME = "oracle19c-client-admin:ol8"
+        DOCKERFILE_PATH = "/home/lalit/workspace/Dockerfile"
+    }
+
+    stages {
+        stage('Check for Updates') {
+            agent { label 'ubuntu' }
+            steps {
+                script {
+                    // Run dnf list to check available versions
+                    sh "whoami"
+                    sh "whoami && id && env | grep PATH"
+                    sh "/home/lalit/.rd/bin/docker images"
+                    def available = sh(
+                        script: "/home/lalit/.rd/bin/docker run --rm oracle19c-client-admin:ol8 dnf list oracle-instantclient* | grep oracle-instantclient19",
+                        returnStdout: true
+                    ).trim()
+
+                    echo "Available Oracle Instant Client packages:\n${available}"
+
+                    // Save to file for comparison
+                    writeFile file: 'available.txt', text: available
+                }
+            }
+        }
+
+        stage('Compare Versions') {
+            steps {
+                script {
+                    // Extract current version from Dockerfile
+                    def dockerfile = readFile("${DOCKERFILE_PATH}")
+                    def currentVersion = dockerfile.find(/oracle-instantclient19\.\d+/)
+
+                    echo "Current version in Dockerfile: ${currentVersion}"
+
+                    // Extract latest version from repo output
+                    def available = readFile("/home/lalit/workspace/detect-19c-patch@2/available.txt")
+                    def latestVersion = (available =~ /oracle-instantclient19\.\d+/)[0]
+
+                    echo "Latest version in repo: ${latestVersion}"
+                    // Set display name in Jenkins UI
+                    currentBuild.displayName = "${latestVersion}"
+
+                    // Optional: set description
+                    currentBuild.description = "Novacmx: ${currentVersion}\nLatest Version: ${latestVersion}"
+                    
+                    if (latestVersion != currentVersion) {
+                        echo "New version detected: ${latestVersion}"
+                        currentBuild.description = "Upgrade to ${latestVersion}"
+                        env.NEW_VERSION = latestVersion
+                    } else {
+                        echo "No new version detected."
+                    }
+                }
+            }
+        }
+
+        stage('Update Dockerfile') {
+            when {
+                expression { env.NEW_VERSION != null }
+            }
+            steps {
+                script {
+                    def dockerfile = readFile("${DOCKERFILE_PATH}")
+                    def updated = dockerfile.replaceAll(/oracle-instantclient19\.\d+/, env.NEW_VERSION)
+                    writeFile file: "${DOCKERFILE_PATH}", text: updated
+                    echo "Dockerfile updated to ${env.NEW_VERSION}"
+                }
+            }
+        }
+
+        stage('Rebuild Image') {
+            when {
+                expression { env.NEW_VERSION != null }
+            }
+            steps {
+                //sh "docker build -t ${IMAGE_NAME} ."
+                sh "echo ${IMAGE_NAME}"
+            }
+        }
+    }
+
+    post {
+        success {
+            echo "Pipeline completed successfully."
+        }
+        failure {
+            echo "Pipeline failed. Check logs."
+        }
+    }
+}
+
