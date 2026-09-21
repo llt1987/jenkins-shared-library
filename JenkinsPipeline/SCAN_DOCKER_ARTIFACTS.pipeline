@@ -196,10 +196,22 @@ Tag: ${IMAGE_TAG}"""
 				sh '''
 				echo "Starting Black Duck Scan..."
 
+                if [[ "$PROJECT_GROUP" == "ASB" || \
+                      "$PROJECT_GROUP" == "CGL" || \
+                      "$PROJECT_GROUP" == "CMC" || \
+                      "$PROJECT_GROUP" == "L&T" ]]; then
+                    BD_PROJECT_NAME="${PROJECT_GROUP}_${IMAGE_NAME}.tar.gz"
+                else
+                    BD_PROJECT_NAME="${IMAGE_NAME}.tar.gz"
+                fi
+
+                echo "Black Duck Project Name: $BD_PROJECT_NAME"
+
+
 				java -jar "$DETECT_JAR" \
 				--blackduck.url="$BLACKDUCK_URL" \
 				--blackduck.api.token="$BLACKDUCK_TOKEN" \
-				--detect.project.name="$IMAGE_NAME.tar.gz" \
+				--detect.project.name="$BD_PROJECT_NAME" \
 				--detect.project.version.name="latest" \
 				--detect.project.version.notes="$IMAGE_TAG" \
 				--detect.project.version.update=true \

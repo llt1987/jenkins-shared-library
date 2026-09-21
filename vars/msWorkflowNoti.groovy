@@ -5,8 +5,9 @@ def call(Map config = [:]) {
     String status      = config.status ?: "INFO"
     String remarks     = config.remarks ?: "N/A"
     String failedStage = config.failedStage ?: ""
+    String buildInfo   = config.buildInfo ?: "#${env.BUILD_NUMBER}"
     String branch      = config.branch ?: (env.BRANCH_NAME ?: "N/A")
-    String webhook = config.webhook ?: "https://default3f9410505131451c8ad67135423e60.94.environment.api.powerplatform.com:443/powerautomate/automations/direct/cu/10/workflows/90f2407e645848f0a08b6fba1e94871a/triggers/manual/paths/invoke?api-version=1&sp=%2Ftriggers%2Fmanual%2Frun&sv=1.0&sig=9yqvlbr5gxt_PhbwMJ0qhzEJdAH8Mf386cTplfQ54RQ"
+    String webhook     = config.webhook ?: "https://default3f9410505131451c8ad67135423e60.94.environment.api.powerplatform.com:443/powerautomate/automations/direct/cu/10/workflows/90f2407e645848f0a08b6fba1e94871a/triggers/manual/paths/invoke?api-version=1&sp=%2Ftriggers%2Fmanual%2Frun&sv=1.0&sig=9yqvlbr5gxt_PhbwMJ0qhzEJdAH8Mf386cTplfQ54RQ"
 
     String statusIcon = "ℹ️"
 
@@ -112,7 +113,7 @@ def call(Map config = [:]) {
             ],
             [
                 type  : "TextBlock",
-                text  : "Latest status of build #${env.BUILD_NUMBER}",
+                text  : "Latest status of build ${buildInfo}",
                 size  : "Medium",
                 wrap  : true
             ],
