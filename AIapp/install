@@ -1,0 +1,2 @@
+node --version && npm --version
+npx create-next-app@latest . --yes
